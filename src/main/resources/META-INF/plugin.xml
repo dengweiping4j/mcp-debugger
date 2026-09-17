@@ -1,0 +1,31 @@
+<!--
+  MCP Debugger 插件声明。
+
+  id / name / vendor / version / description / changeNotes 由 build.gradle.kts 的
+  pluginConfiguration 统一注入（Gradle 任务会覆盖这里的同名节点），此处保留一份
+  可读的声明，方便直接阅读插件元信息；改元信息请改 build.gradle.kts，两处需保持一致。
+-->
+<idea-plugin>
+    <id>com.tool4j.mcp.debug</id>
+    <name>MCP Debugger</name>
+    <vendor>tool4j</vendor>
+
+    <description><![CDATA[
+    Postman-style console for MCP (Model Context Protocol) servers, inside your IDE.
+    ]]></description>
+
+    <!--
+      只依赖平台基础模块：这样同一个包可以装进 PyCharm、IDEA、WebStorm、GoLand 等
+      所有 JetBrains IDE。JSON 语法高亮通过 FileTypeManager 按扩展名查找，
+      所以即使目标 IDE 没有 JSON 插件也只是退化成纯文本，不会报错。
+    -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+                id="MCP Debugger"
+                anchor="right"
+                icon="/icons/mcpToolWindow.svg"
+                factoryClass="com.tool4j.mcp.ui.McpToolWindowFactory"/>
+    </extensions>
+</idea-plugin>

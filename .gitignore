@@ -1,0 +1,23 @@
+# Gradle 构建产物
+build/
+.gradle/
+.intellijPlatform/
+
+# 解包检查发行包用的临时目录
+.inspect/
+
+# 冒烟测试的运行产物（测试源码 smoke/*.java、smoke/*.py 要提交）
+smoke/out/
+smoke/*.class
+
+# IDE
+.idea/
+*.iml
+out/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 工具元数据
+.zcode/
