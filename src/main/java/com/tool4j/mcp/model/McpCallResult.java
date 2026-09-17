@@ -14,7 +14,7 @@ import java.util.List;
  * 一次 {@code tools/call}（或 {@code resources/read} / {@code prompts/get}）的结果。
  *
  * <p>刻意保留原始 {@link #getRaw()} 响应对象：调试工具的价值一半在于"看到的和协议里的一模一样"，
- * "原始 JSON"页签直接渲染它。
+ * 界面直接把这一份 result 渲染成 JSON。
  *
  * <p>三种响应虽然都是 JSON-RPC 的 {@code result}，但装内容的字段名各不相同：
  * <ul>
@@ -22,8 +22,8 @@ import java.util.List;
  *   <li>{@code resources/read} → {@code result.contents[]}（资源对象，带 text 或 blob）</li>
  *   <li>{@code prompts/get} → {@code result.messages[]}（带 role 的消息，content 可能是块或块数组）</li>
  * </ul>
- * 界面只认识一种形态。所以这里在构造时就把三者**归一化**成同一份 {@link #getContent()} 内容块列表，
- * 界面层不需要为每种方法写一条分支；服务端如果返回了非标准的形态，也只是落到"未知类型"分支里显示原始 JSON。
+ * 所以这里在构造时把三者**归一化**成同一份 {@link #getContent()} 内容块列表，
+ * 让"这次回了几个内容块、有没有结构化内容"这类判断不必再为每种方法写一条分支。
  */
 @Getter
 public class McpCallResult {
@@ -32,7 +32,7 @@ public class McpCallResult {
      * 非标准键：{@code prompts/get} 里这条内容属于哪个角色。
      *
      * <p>把 role 挂在内容块上而不是另开一个结构，是为了让"内容块"这一种形态能同时表达
-     * 工具结果与提示词消息——界面照旧只需要遍历一个列表。
+     * 工具结果与提示词消息——统计内容块时不必先分清这是哪一种响应。
      */
     public static final String ROLE_KEY = "x-role";
 
@@ -70,31 +70,6 @@ public class McpCallResult {
 
     public boolean isSuccess() {
         return error == null && !toolError;
-    }
-
-    /**
-     * 把所有内容块的可读文本拼起来，用于"一键复制"与一句话预览。
-     *
-     * <p>非文本块不会静默丢掉——图片 / 二进制会给一句带类型和体积的占位，
-     * 否则复制出去的是一片空白，看起来像调用没返回东西。
-     */
-    public String joinText() {
-        StringBuilder sb = new StringBuilder();
-        for (JsonObject item : content) {
-            String text = textOf(item);
-            if (text == null || text.isEmpty()) {
-                continue;
-            }
-            if (sb.length() > 0) {
-                sb.append('\n');
-            }
-            String role = JsonUtil.str(item, ROLE_KEY, null);
-            if (role != null && !role.isBlank()) {
-                sb.append(role).append(": ");
-            }
-            sb.append(text);
-        }
-        return sb.toString();
     }
 
     // ------------------------------------------------------------------
@@ -175,43 +150,5 @@ public class McpCallResult {
             block.addProperty(ROLE_KEY, role);
         }
         return block;
-    }
-
-    /** 从任意形态的内容块里取出可读文本。 */
-    private static String textOf(JsonObject item) {
-        String type = JsonUtil.str(item, "type", "");
-        switch (type) {
-            case "text":
-                return JsonUtil.str(item, "text", "");
-            case "image":
-            case "audio":
-                return "[" + type + " · " + JsonUtil.str(item, "mimeType", "未知类型")
-                        + " · " + describeSize(JsonUtil.str(item, "data", null)) + "]";
-            case "resource":
-            case "resource_link": {
-                JsonObject inner = JsonUtil.object(item, "resource");
-                if (inner == null) {
-                    return JsonUtil.str(item, "uri", JsonUtil.compact(item));
-                }
-                String text = JsonUtil.str(inner, "text", null);
-                if (text != null) {
-                    return text;
-                }
-                String uri = JsonUtil.str(inner, "uri", "(无 uri)");
-                String blob = JsonUtil.str(inner, "blob", null);
-                return "[" + uri + " · " + (blob == null ? "无内容" : describeSize(blob)) + "]";
-            }
-            default:
-                return JsonUtil.compact(item);
-        }
-    }
-
-    /** base64 长度换算成原始字节数，让"多少数据"这件事有个直观数字。 */
-    private static String describeSize(String base64) {
-        if (base64 == null || base64.isEmpty()) {
-            return "无数据";
-        }
-        int padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-        return Math.max(0, base64.length() / 4 * 3 - padding) + " 字节";
     }
 }

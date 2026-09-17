@@ -81,9 +81,8 @@ intellijPlatform {
                 sections, arrays into one-per-line lists. Required fields are marked, defaults are
                 prefilled, and <code>${'$'}ref</code> / <code>allOf</code> are resolved. Prefer raw JSON?
                 Switch to the JSON tab and the typed payload wins.</li>
-                <li><b>Results you can actually read</b> — text, structured content, embedded resources
-                and base64 images are all rendered, with the raw JSON-RPC response one tab away and the
-                round-trip time next to the status.</li>
+                <li><b>Results, verbatim</b> — the JSON-RPC result is shown as-is, in a highlighted,
+                scrollable editor, with one copy button and the round-trip time next to the status.</li>
                 <li><b>Wire-level console</b> — every request, response, notification and stderr line is
                 logged with direction and timing, which is what you need when a server misbehaves.</li>
                 <li><b>Import existing configs</b> — paste or import the familiar
@@ -103,8 +102,8 @@ intellijPlatform {
                 <li><b>自动生成参数表单</b>：按工具的 JSON Schema 生成真实表单——枚举变下拉框、布尔变三态选择、
                 嵌套对象分组折叠、数组按行填写；必填项带标记、默认值自动填入，<code>${'$'}ref</code> 与
                 <code>allOf</code> 会被展开。想直接写 JSON？切到 JSON 页签，以你当前所在页签为准。</li>
-                <li><b>结果好读</b>：文本、结构化内容、内嵌资源、base64 图片都能直接看，原始 JSON-RPC 响应就在隔壁
-                页签，调用耗时显示在状态旁边。</li>
+                <li><b>结果原样呈现</b>：调用结果直接显示为 JSON（语法高亮、可滚动），一个「复制」按钮拿走同一份
+                内容，调用耗时显示在状态旁边。</li>
                 <li><b>报文级日志</b>：请求、响应、通知、子进程 stderr 全部按方向与时间落盘到控制台，
                 排查服务端问题时最有用。</li>
                 <li><b>导入现成配置</b>：粘贴或导入 Claude Desktop / Cursor / VS Code 的

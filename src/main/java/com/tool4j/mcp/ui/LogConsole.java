@@ -49,7 +49,7 @@ public final class LogConsole extends JPanel {
 
     /** 文档超过这个长度就从头部裁掉，避免跑久了把 EDT 拖死。 */
     private static final int MAX_CHARS = 400_000;
-    /** 单条报文最多显示这么长；完整报文永远能在「原始 JSON」页签里看。 */
+    /** 单条报文最多显示这么长；要看完整报文就调用一次，结果区里是原样的 JSON。 */
     private static final int PAYLOAD_LIMIT = 4_000;
 
     private static final SimpleDateFormat TIME = new SimpleDateFormat("HH:mm:ss.SSS");

@@ -9,6 +9,8 @@ import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
@@ -106,6 +108,40 @@ public final class Ui {
     }
 
     // ------------------------------------------------------------------
+    // 表单控件尺寸
+    // ------------------------------------------------------------------
+
+    /**
+     * 参数类单行控件的紧凑高度。
+     *
+     * <p>不给尺寸时走 LAF 默认，在窄边栏里偏胖；统一压到 22，一行省几像素，
+     * 十来个参数叠起来就是"一屏能多看两三个"。
+     */
+    public static final int INPUT_HEIGHT = 22;
+
+    /** 参数类单行控件的默认宽度上限。跟着可用宽度走，但窗口拉宽了也不让它无限变长。 */
+    public static final int INPUT_MAX_WIDTH = 220;
+
+    public static <T extends JComponent> T compactInput(T component) {
+        return compactInput(component, INPUT_MAX_WIDTH);
+    }
+
+    /**
+     * 把单行控件压成紧凑尺寸：高度固定，宽度可拉伸但有上限。
+     *
+     * <p>宽度上限靠 {@code maximumSize} 生效——这类字段通常被塞在 Y 轴 {@code BoxLayout}
+     * 里，而它正是按 {@code maximumSize} 决定要不要横向拉满的。
+     */
+    public static <T extends JComponent> T compactInput(T component, int maxWidth) {
+        int height = JBUI.scale(INPUT_HEIGHT);
+        int width = JBUI.scale(maxWidth);
+        component.setPreferredSize(new Dimension(width, height));
+        component.setMinimumSize(new Dimension(JBUI.scale(60), height));
+        component.setMaximumSize(new Dimension(width, height));
+        return component;
+    }
+
+    // ------------------------------------------------------------------
     // 文本
     // ------------------------------------------------------------------
 
@@ -123,6 +159,44 @@ public final class Ui {
         label.setForeground(MUTED);
         label.setFont(smaller(label.getFont()));
         return label;
+    }
+
+    /**
+     * 等宽只读文本块，外层套滚动条。
+     *
+     * <p>行数少就直接铺开（交给外层滚动条统一滚），行数多就套一个固定高度的内层滚动区，
+     * 免得超长文本把整个布局撑爆。
+     *
+     * <p>之所以永远套内层滚动：长行会软换行，行数不等于显示行数，靠 {@code rows} 算高度必错。
+     *
+     * @param maxHeight &lt;= 0 表示强制铺开
+     */
+    public static JComponent textBody(String text, int maxHeight, JBColor colorOverride) {
+        String content = text == null ? "" : text;
+        JBTextArea area = new JBTextArea(content);
+        area.setEditable(false);
+        area.setFont(monospace());
+        area.setLineWrap(true);
+        area.setWrapStyleWord(false);
+        area.setOpaque(false);
+        area.setBorder(JBUI.Borders.empty(2, 4));
+        if (colorOverride != null) {
+            area.setForeground(colorOverride);
+        }
+
+        int lineHeight = Math.max(12, area.getFontMetrics(area.getFont()).getHeight());
+        int lines = 1;
+        for (int i = 0; i < content.length(); i++) {
+            if (content.charAt(i) == '\n') {
+                lines++;
+            }
+        }
+        JBScrollPane scroll = new JBScrollPane(area);
+        scroll.setBorder(JBUI.Borders.empty());
+        int natural = lines * lineHeight + JBUI.scale(14);
+        int limit = maxHeight > 0 ? JBUI.scale(maxHeight) : natural;
+        scroll.setPreferredSize(new Dimension(0, Math.min(Math.max(natural, JBUI.scale(36)), limit)));
+        return scroll;
     }
 
     /** 段落标题：加粗 + 下面一条细分隔线。 */

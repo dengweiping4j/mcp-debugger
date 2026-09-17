@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * JSON Schema 的轻量解析：只做"把一件工具的 inputSchema 读懂到能生成表单"这件事。
+ * JSON Schema 的轻量解析：只做"把一件工具的 inputSchema 读懂到能生成参数模板"这件事。
  *
  * <p>不做完整校验（那需要一整个 JSON Schema 实现），但把实际会碰到的几类情况都兜住了：
  * <ul>
@@ -211,6 +211,23 @@ public final class SchemaUtil {
             }
             return "string";
         }
+        // 没有 type 就按 default 猜。Python 侧写出来的 MCP 服务经常整条函数不写类型注解，
+        // schema 里就只剩 title / description / default（例如
+        // "start_line": {"default": 1, "title": "Start Line"}）。
+        // 猜得出类型就能给它一个像样的控件（数字框、布尔下拉），猜不出来才交给调用方兜底。
+        JsonElement def = schema.get("default");
+        if (def != null && def.isJsonPrimitive()) {
+            JsonPrimitive p = def.getAsJsonPrimitive();
+            if (p.isBoolean()) {
+                return "boolean";
+            }
+            if (p.isNumber()) {
+                return isIntegral(p) ? "integer" : "number";
+            }
+            if (p.isString()) {
+                return "string";
+            }
+        }
         return "";
     }
 
@@ -289,8 +306,80 @@ public final class SchemaUtil {
         return schema.get("default");
     }
 
+    // ------------------------------------------------------------------
+    // 参数模板：选中工具时预填进 JSON 输入区的那份骨架
+    // ------------------------------------------------------------------
+
+    /**
+     * 按 schema 生成一份参数模板，把<b>声明的每个参数</b>都列出来。
+     *
+     * <p>取值顺序：{@code default} → 枚举首项 → 按类型的空值
+     * （{@code string→""}、{@code integer/number→0}、{@code boolean→false}、
+     * {@code array→[]}、{@code object→}递归，其余一律 {@code ""}）。
+     *
+     * <p>为什么不写 {@code "string"} 这种示例文本（Swagger UI 的做法）：那是给"看文档"的人看的，
+     * 发出去能跑；而这里是要被人直接点「调用」的，示例文本长得太像真数据，容易被连带发走。
+     * 空值一眼就知道"这个还得填"，且 JSON 结构完整、随时可以解析。
+     *
+     * <p>枚举取首项是唯一的例外——它至少保证是 schema 允许的取值，
+     * 给 {@code ""} 反而必然被服务端拒掉。
+     *
+     * <p>注意 {@code type: "null"} 这类字段也给 {@code ""}：{@code null} 在序列化时会被 Gson
+     * 整个丢掉（{@code serializeNulls} 默认关），键就会从模板里消失——那就又回到
+     * "界面上的参数比协议里声明的少"这个毛病上了。
+     */
+    public static JsonObject template(JsonObject schema) {
+        JsonObject root = schema == null ? emptyObjectSchema() : schema;
+        return templateOf(root, normalize(root, root), 0);
+    }
+
+    private static JsonObject templateOf(JsonObject root, JsonObject schema, int depth) {
+        JsonObject out = new JsonObject();
+        if (schema == null || depth > MAX_REF_DEPTH) {
+            return out;
+        }
+        for (Map.Entry<String, JsonElement> e : properties(schema).entrySet()) {
+            if (!e.getValue().isJsonObject()) {
+                continue;
+            }
+            JsonObject prop = normalize(root, e.getValue().getAsJsonObject(), depth + 1);
+            out.add(e.getKey(), sampleOf(root, prop, depth + 1));
+        }
+        return out;
+    }
+
+    /** 单个参数的示例值。 */
+    private static JsonElement sampleOf(JsonObject root, JsonObject prop, int depth) {
+        JsonElement def = defaultValue(prop);
+        if (def != null) {
+            return def.deepCopy();
+        }
+        JsonArray en = enumValues(prop);
+        if (en != null && !en.isEmpty()) {
+            JsonElement first = en.get(0);
+            if (!first.isJsonNull()) {
+                return first.deepCopy();
+            }
+        }
+        if (depth > MAX_REF_DEPTH) {
+            return new JsonPrimitive("");
+        }
+        return switch (typeOf(prop)) {
+            case "object" -> templateOf(root, prop, depth);
+            case "array" -> new JsonArray();
+            case "boolean" -> new JsonPrimitive(false);
+            case "integer", "number" -> new JsonPrimitive(0);
+            default -> new JsonPrimitive("");
+        };
+    }
+
     /**
      * 这个子树是否必须退化成"直接写 JSON"。
+     *
+     * <p>注意 {@code type == ""} 的返回值是 <b>false</b>：服务端没声明类型不等于值是一坨结构，
+     * 事实上绝大多数就是"没写注解的字符串/数字"。当成 JSON 处理的话界面上会出现一个
+     * 72px 高的等宽输入框，"填个 repo_id"变得比填一段配置还隆重。
+     * untyped 字段按普通文本给值即可（见 {@link #template} 的 {@code default} 分支）。
      *
      * @param depth 当前嵌套深度，超过 3 层就交给 JSON 编辑器，否则表单会又深又难用
      */
@@ -305,7 +394,7 @@ public final class SchemaUtil {
         return switch (type) {
             case "object" -> !hasProperties(schema) || schema.has("additionalProperties") || depth >= 3;
             case "array" -> items(schema) == null || needsJsonEditor(items(schema), depth + 1);
-            case "" -> true;
+            case "" -> false;
             default -> false;
         };
     }
@@ -336,7 +425,8 @@ public final class SchemaUtil {
             case "null" -> bits.add("必须为 null");
             case "array" -> bits.add("数组");
             case "object" -> bits.add("对象");
-            default -> bits.add("任意类型");
+            // 服务端什么都没声明：界面上是单行输入，说"未声明类型"比"任意类型"更实在
+            default -> bits.add("未声明类型");
         }
 
         if ("array".equals(type)) {

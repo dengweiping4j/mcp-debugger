@@ -186,7 +186,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
                 if (argument.getName() == null || argument.getName().isBlank()) {
                     continue;
                 }
-                JBTextField field = new JBTextField();
+                JBTextField field = Ui.compactInput(new JBTextField());
                 field.setToolTipText(argument.getDescription());
                 argFields.put(argument.getName(), field);
 
@@ -299,7 +299,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         if (result.getError() != null) {
             statusLabel.setForeground(Ui.ERROR);
             statusLabel.setText("获取失败");
-            messagesHost.add(ResultView.textBody(result.getError(), 0, Ui.ERROR));
+            messagesHost.add(Ui.textBody(result.getError(), 0, Ui.ERROR));
         } else {
             statusLabel.setForeground(Ui.OK);
             statusLabel.setText("完成 · " + result.getElapsedMillis() + " ms");
@@ -327,7 +327,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         statusLabel.setForeground(Ui.ERROR);
         statusLabel.setText("获取失败");
         messagesHost.removeAll();
-        messagesHost.add(ResultView.textBody(message, 0, Ui.ERROR));
+        messagesHost.add(Ui.textBody(message, 0, Ui.ERROR));
         messagesHost.revalidate();
         messagesHost.repaint();
     }
@@ -364,7 +364,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         label.setFont(Ui.smaller(label.getFont().deriveFont(Font.BOLD)));
         label.setForeground(UIUtil.getContextHelpForeground());
         panel.add(label, BorderLayout.NORTH);
-        panel.add(ResultView.textBody(text, 260, null), BorderLayout.CENTER);
+        panel.add(Ui.textBody(text, 260, null), BorderLayout.CENTER);
         panel.setAlignmentX(LEFT_ALIGNMENT);
         return panel;
     }

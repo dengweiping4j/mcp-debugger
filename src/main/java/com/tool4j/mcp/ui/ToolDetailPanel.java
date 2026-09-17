@@ -30,25 +30,27 @@ import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.KeyStroke;
 import java.awt.BorderLayout;
-import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
- * 工具详情：描述 + 参数 + 调用 + 结果。
+ * 工具详情：描述 + 参数（JSON）+ 调用 + 结果。
  *
- * <p>参数区有一组页签，<b>以当前所在页签为准</b>：
+ * <p>参数区只有两个页签，<b>JSON 是唯一的输入入口</b>：
  * <ul>
- *   <li><b>参数</b>：由 schema 生成的真实表单（推荐，必填有标记、类型有提示、校验有红字）。</li>
- *   <li><b>JSON</b>：直接写原始 JSON，适合塞复杂结构或从别处粘贴一段参数。第一次从这个页签切过来时，
- *   会自动把表单当前内容填进去当起点，不用手敲。</li>
- *   <li><b>定义</b>：工具原始定义（含 annotations 与 outputSchema），排查"服务端到底声明了什么"时用。</li>
+ *   <li><b>JSON</b>：选中工具时按它的 {@code inputSchema} 预填一份模板——声明的每个参数都在，
+ *   值取 schema 的 {@code default}，没 default 的按类型给空值。改哪几个值就发哪几个字段，
+ *   多余的删掉即可。</li>
+ *   <li><b>定义</b>：工具原始定义（含 annotations 与 outputSchema）。参数的类型、必填、说明、
+ *   默认值都能在这里查到，不用另开文档。</li>
  * </ul>
+ *
+ * <p>原先还有个「参数」表单页签，已移除：它和 JSON 页签表达的是同一件事，
+ * 两套输入只让用户多一层"我现在改动的是哪个页签"的心智负担。
  */
 public final class ToolDetailPanel extends JPanel implements Disposable {
 
@@ -60,41 +62,36 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     private final JBLabel titleLabel = new JBLabel(" ");
     private final JBLabel badgesLabel = Ui.hint(" ");
     private final JBTextArea descriptionArea = new JBTextArea();
-    private final JBLabel usageHint = Ui.hint("");
     private final JBLabel statusLabel = Ui.hint("");
     private final JButton invokeButton = new JButton("调用");
-    private final JButton resetButton = new JButton("清空");
+    private final JButton resetButton = new JButton("重置");
 
-    private final SchemaFormPanel form;
     private final EditorTextField jsonEditor;
     private final EditorTextField definitionViewer;
-    private final JBTabbedPane paramTabs = new JBTabbedPane();
+    private final JBTabbedPane tabs = new JBTabbedPane();
     private final ResultView resultView;
     private final JBSplitter splitter;
 
     private McpTool tool;
     private Callback callback;
     private boolean busy;
-    /** JSON 页签是否已被自动填充过，避免每次切换都覆盖用户的改动。 */
-    private boolean jsonInitialized;
 
     public ToolDetailPanel(Project project, Disposable parent) {
         super(new BorderLayout());
         setOpaque(false);
 
-        form = new SchemaFormPanel(project);
         jsonEditor = Editors.sized(Editors.jsonEditor(project, "", parent), 260);
         definitionViewer = Editors.sized(Editors.jsonViewer(project, "", parent), 260);
+        // 编辑器自带 Keymap，面板级的 Ctrl+Enter 到不了它，得挂进编辑器自己身上
+        Editors.onInvokeShortcut(jsonEditor, this::invoke);
 
-        paramTabs.addTab("参数", form);
-        paramTabs.addTab("JSON", wrapEditor(jsonEditor));
-        paramTabs.addTab("定义", wrapEditor(definitionViewer));
-        paramTabs.addChangeListener(e -> onTabChanged());
+        tabs.addTab("JSON", wrapEditor(jsonEditor));
+        tabs.addTab("定义", wrapEditor(definitionViewer));
 
         JPanel paramArea = new JPanel(new BorderLayout());
         paramArea.setOpaque(false);
         paramArea.add(buildActionRow(), BorderLayout.NORTH);
-        paramArea.add(paramTabs, BorderLayout.CENTER);
+        paramArea.add(tabs, BorderLayout.CENTER);
 
         resultView = new ResultView(project, parent);
 
@@ -137,16 +134,6 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         titleRow.add(badgesLabel);
         titleRow.add(Box.createHorizontalGlue());
 
-        // 用量提示（"将使用哪个页签的参数 · 几个参数"）原来挤在按钮行里，
-        // 边栏一窄就被挤没了；放到标题下面单独一行，宽度不够时大不了省略号。
-        JPanel headerTop = new JPanel();
-        headerTop.setOpaque(false);
-        headerTop.setLayout(new BoxLayout(headerTop, BoxLayout.Y_AXIS));
-        titleRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        usageHint.setAlignmentX(Component.LEFT_ALIGNMENT);
-        headerTop.add(titleRow);
-        headerTop.add(usageHint);
-
         descriptionArea.setEditable(false);
         descriptionArea.setLineWrap(true);
         descriptionArea.setWrapStyleWord(true);
@@ -162,7 +149,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         JPanel header = new JPanel(new BorderLayout());
         header.setOpaque(false);
         header.setBorder(JBUI.Borders.empty(6, 8, 4, 8));
-        header.add(headerTop, BorderLayout.NORTH);
+        header.add(titleRow, BorderLayout.NORTH);
         header.add(descriptionScroll, BorderLayout.CENTER);
         return header;
     }
@@ -170,9 +157,8 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     /**
      * 参数区那一排按钮。
      *
-     * <p>只有「调用」保留文字（主操作值得占宽度），清空 / 格式化换成图标按钮：
-     * 在右侧边栏里"调用 清空 格式化 JSON"三个文字按钮能吃掉大半个宽度，
-     * 把状态文字挤到看不见。usageHint 挪去了标题下方。
+     * <p>只有「调用」保留文字（主操作值得占宽度），重置 / 美化换成图标按钮：
+     * 在右侧边栏里三个文字按钮能吃掉大半个宽度，把状态文字挤到看不见。
      */
     private JComponent buildActionRow() {
         invokeButton.setToolTipText("调用该工具（Ctrl+Enter）");
@@ -180,13 +166,11 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
 
         resetButton.setIcon(AllIcons.General.Reset);
         resetButton.setText("");
-        resetButton.setToolTipText("清空所有参数，回到 schema 的默认值");
+        resetButton.setToolTipText("重置为按工具定义生成的参数");
         resetButton.setMargin(JBUI.insets(2, 4, 2, 4));
         resetButton.setFocusable(false);
         resetButton.addActionListener(e -> {
-            form.reset();
-            jsonEditor.setText("");
-            jsonInitialized = false;
+            prefillArguments(tool);
             statusLabel.setText("");
         });
 
@@ -218,6 +202,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         return row;
     }
 
+    /** 面板级快捷键：焦点不在 JSON 编辑器里时（列表、按钮、只读视图）也能触发调用。 */
     private void installShortcuts() {
         InputMap inputMap = getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
         ActionMap actionMap = getActionMap();
@@ -242,15 +227,12 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         tool = null;
         titleLabel.setText("选择一个工具");
         badgesLabel.setText("");
-        setDescription("从左侧列表里点开任意工具，这里会按它的 JSON Schema 生成参数表单。"
-                + "只想手动写 JSON 的话，切到「JSON」页签即可。");
-        usageHint.setText("");
+        setDescription("从左侧列表里点开任意工具，这里会按它的定义预填一份参数 JSON。"
+                + "参数的类型、必填和说明在「定义」页签里。");
         statusLabel.setText("");
-        form.setSchema(SchemaUtil.emptyObjectSchema(), null);
-        jsonEditor.setText("");
+        prefillArguments(null);
         definitionViewer.setText("");
-        jsonInitialized = false;
-        paramTabs.setSelectedIndex(0);
+        tabs.setSelectedIndex(0);
         setBusy(false);
         resultView.clear();
     }
@@ -261,48 +243,41 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         badgesLabel.setText(badges(tool));
         String description = tool.getDescription();
         setDescription(description == null || description.isBlank() ? "（该工具没有提供描述）" : description);
-        form.setSchema(tool.getInputSchema(), null);
-        jsonEditor.setText("");
+        prefillArguments(tool);
         definitionViewer.setText(JsonUtil.pretty(tool.getRaw()));
-        jsonInitialized = false;
-        paramTabs.setSelectedIndex(0);
+        tabs.setSelectedIndex(0);
         statusLabel.setText("");
         setBusy(false);
         resultView.clear();
-        updateUsageHint();
+    }
+
+    /**
+     * 按工具的 inputSchema 预填参数。
+     *
+     * <p>以前这里是"切到 JSON 页签时把表单当前内容搬过来"，而表单只在"用户填过值"时才收集字段，
+     * 于是没有 default 的参数一个都不会出现在 JSON 里——页签看着一片空白，
+     * 用户既不知道有哪些参数，也就无从下手（"为什么这个工具的 JSON 是空的"就是这么来的）。
+     * 现在直接按 schema 声明生成，每个参数都在，且永远是一份能解析的 JSON。
+     *
+     * <p>没有 inputSchema（或 schema 畸形）时给 {@code {}}：宁可给一个空对象让人自己往里写，
+     * 也不要留一个没有内容、没有提示的空白编辑区。
+     */
+    private void prefillArguments(McpTool target) {
+        JsonObject template = new JsonObject();
+        if (target != null && target.hasInputSchema()) {
+            try {
+                template = SchemaUtil.template(target.getInputSchema());
+            } catch (RuntimeException ignored) {
+                // 服务端 schema 再畸形也不该让输入区变成白板，退回空对象即可
+            }
+        }
+        jsonEditor.setText(JsonUtil.pretty(template));
+        jsonEditor.setCaretPosition(0);
     }
 
     private void setDescription(String text) {
         descriptionArea.setText(text);
         descriptionArea.setCaretPosition(0);
-    }
-
-    private void onTabChanged() {
-        int index = paramTabs.getSelectedIndex();
-        if (index == 1 && !jsonInitialized) {
-            jsonInitialized = true;
-            // 以表单当前内容为起点，避免用户对着空白页签从零开始敲
-            JsonObject fromForm = form.buildArguments().getArguments();
-            jsonEditor.setText(fromForm.size() == 0 ? "" : JsonUtil.pretty(fromForm));
-        }
-        updateUsageHint();
-    }
-
-    private void updateUsageHint() {
-        if (tool == null) {
-            usageHint.setText("");
-            return;
-        }
-        JsonObject schema = tool.hasInputSchema()
-                ? SchemaUtil.normalize(tool.getInputSchema(), tool.getInputSchema())
-                : SchemaUtil.emptyObjectSchema();
-        Set<String> requiredNames = SchemaUtil.required(schema);
-        int total = SchemaUtil.properties(schema).entrySet().size();
-
-        List<String> bits = new ArrayList<>();
-        bits.add(paramTabs.getSelectedIndex() == 1 ? "将使用「JSON」页签的参数" : "将使用「参数」页签的表单");
-        bits.add(total == 0 ? "该工具无需参数" : total + " 个参数" + (requiredNames.isEmpty() ? "" : "（含必填）"));
-        usageHint.setText(String.join("  ·  ", bits));
     }
 
     private void setBusy(boolean value) {
@@ -342,29 +317,17 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         if (tool == null || busy || callback == null) {
             return;
         }
-        boolean fromJson = paramTabs.getSelectedIndex() == 1;
         JsonObject arguments;
-        if (fromJson) {
-            try {
-                arguments = JsonUtil.parseObjectLenient(jsonEditor.getText());
-            } catch (IllegalArgumentException e) {
-                statusLabel.setForeground(Ui.ERROR);
-                statusLabel.setText("JSON 参数有误：" + e.getMessage());
-                return;
-            }
-        } else {
-            SchemaFormPanel.Outcome outcome = form.buildArguments();
-            if (!outcome.isOk()) {
-                statusLabel.setForeground(Ui.ERROR);
-                statusLabel.setText("参数校验未通过（" + outcome.getProblems().size() + " 处，已在表单里标红）");
-                return;
-            }
-            arguments = outcome.getArguments();
+        try {
+            arguments = JsonUtil.parseObjectLenient(jsonEditor.getText());
+        } catch (IllegalArgumentException e) {
+            statusLabel.setForeground(Ui.ERROR);
+            statusLabel.setText("JSON 参数有误：" + e.getMessage());
+            return;
         }
 
         statusLabel.setForeground(JBColor.GRAY);
-        statusLabel.setText((fromJson ? "以 JSON 页签的参数调用" : "以表单参数调用")
-                + "（" + arguments.size() + " 个字段）");
+        statusLabel.setText("以 " + arguments.size() + " 个参数调用");
         setBusy(true);
         resultView.showLoading("工具 " + tool.getName());
         callback.invokeTool(tool, arguments);
@@ -400,7 +363,6 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
 
     @Override
     public void dispose() {
-        form.dispose();
         resultView.dispose();
     }
 }
