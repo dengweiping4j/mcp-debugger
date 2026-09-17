@@ -25,8 +25,9 @@ import java.util.Objects;
  * 换工程也还在——MCP 服务端本来就是机器级的资源。
  *
  * <p>安全提示会显示在配置对话框上：{@code env} / {@code headers} 里的 token 是明文存的，
- * 这里不做加密（{@code PasswordSafe} 需要用户交互，反而会让"自动化脚本注入配置"这条路走不通），
- * 但界面上默认按敏感值打码显示，也绝不会把值写进报文日志。
+ * 这里不做加密（{@code PasswordSafe} 需要用户交互，反而会让"自动化脚本注入配置"这条路走不通）。
+ * 环境变量在配置对话框里默认打码显示；请求头在工具窗口的 JSON 编辑器里编辑（要随时改的就是它，
+ * 明摆着更好用）。两者都绝不会把值写进报文日志。
  */
 @State(name = "McpDebuggerSettings", storages = @Storage("mcp-debugger.xml"))
 @Service(Service.Level.APP)

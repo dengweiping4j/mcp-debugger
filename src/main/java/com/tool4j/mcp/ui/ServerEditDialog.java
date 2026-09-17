@@ -16,6 +16,7 @@ import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.JBUI;
 
 import com.tool4j.mcp.protocol.McpException;
+import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.model.TransportType;
 import com.tool4j.mcp.protocol.JsonUtil;
@@ -68,7 +69,6 @@ public final class ServerEditDialog extends DialogWrapper {
     private final JBTextField urlField = new JBTextField();
 
     private final KeyValueTable envTable = new KeyValueTable("变量名", "值", true);
-    private final KeyValueTable headerTable = new KeyValueTable("请求头", "值", true);
 
     private final JBTextField protocolVersionField = new JBTextField();
     private final JBTextField timeoutField = new JBTextField();
@@ -111,7 +111,6 @@ public final class ServerEditDialog extends DialogWrapper {
         workingDirField.setText(source == null ? "" : source.getWorkingDir());
         urlField.setText(source == null ? "" : source.getUrl());
         envTable.setRows(source == null ? List.of() : source.getEnv());
-        headerTable.setRows(source == null ? List.of() : source.getHeaders());
         protocolVersionField.setText(source == null || source.getProtocolVersion() == null
                 || source.getProtocolVersion().isBlank()
                 ? McpServerConfig.DEFAULT_PROTOCOL_VERSION : source.getProtocolVersion());
@@ -144,7 +143,7 @@ public final class ServerEditDialog extends DialogWrapper {
     protected @Nullable JComponent createCenterPanel() {
         JBTabbedPane tabs = new JBTabbedPane();
         tabs.addTab("连接", Ui.wrap(buildConnectionTab(), 8, 8, 8, 8));
-        tabs.addTab("附加参数", Ui.wrap(buildExtraTab(), 8, 8, 8, 8));
+        tabs.addTab("环境变量", Ui.wrap(buildExtraTab(), 8, 8, 8, 8));
         tabs.addTab("高级", Ui.wrap(buildAdvancedTab(), 8, 8, 8, 8));
         tabs.setPreferredSize(new Dimension(JBUI.scale(560), JBUI.scale(380)));
         return tabs;
@@ -232,15 +231,19 @@ public final class ServerEditDialog extends DialogWrapper {
         return panel;
     }
 
+    /**
+     * 只有环境变量了。
+     *
+     * <p>请求头原先也在这里，现在搬到了工具窗口右侧的「请求头」栏（和请求 JSON 挨着）——
+     * 它是随调试反复改的东西，放在配置对话框里"改一次要点三层、改完还得保存再重连"。
+     * 数据仍然是配置里的同一个 {@link McpServerConfig#getHeaders()}，这里不再提供第二个入口。
+     */
     private JComponent buildExtraTab() {
         JPanel panel = new JPanel(new BorderLayout(0, JBUI.scale(8)));
         panel.setOpaque(false);
         panel.add(section("环境变量（仅 stdio 生效）", envTable,
                 "追加或覆盖子进程的环境变量；没列出的变量继承 IDE 进程。"
                         + "值里出现 ${...} 不会被展开，请直接写真实值。"), BorderLayout.CENTER);
-        panel.add(section("请求头（仅 http / sse 生效）", headerTable,
-                "鉴权之类需要额外请求头时填这里，例如 Authorization: Bearer xxx。"
-                        + "Content-Type 与 Accept 由插件自动带上。"), BorderLayout.SOUTH);
         return panel;
     }
 
@@ -279,8 +282,8 @@ public final class ServerEditDialog extends DialogWrapper {
 
     private JComponent securityNote() {
         JBLabel note = Ui.htmlHint(
-                "提示：环境变量与请求头里的 token 以明文保存在 IDE 配置目录的 mcp-debugger.xml 里，"
-                        + "配置界面默认把它们打成 ••••（只是显示效果）。"
+                "提示：环境变量与请求头里的 token 都以明文保存在 IDE 配置目录的 mcp-debugger.xml 里"
+                        + "（请求头在工具窗口的「请求头」栏里改，这个对话框不再重复提供入口）。"
                         + "请不要把这份配置文件提交到版本库，也不要贴进公开 Issue。");
         note.setFont(Ui.smaller(note.getFont()));
         return Ui.wrap(note, 2, 2, 2, 2);
@@ -421,7 +424,9 @@ public final class ServerEditDialog extends DialogWrapper {
         config.setWorkingDir(workingDirField.getText() == null ? "" : workingDirField.getText().trim());
         config.setUrl(urlField.getText() == null ? "" : urlField.getText().trim());
         config.setEnv(envTable.getRows());
-        config.setHeaders(headerTable.getRows());
+        // 请求头不在这个对话框里编辑（见工具窗口的「请求头」栏），但编辑已有服务器时必须原样带过去：
+        // applyTo() 是整份覆盖，不带上就等于"点一次保存把 token 抹掉"。
+        config.setHeaders(copyHeaders(original));
         String protocolVersion = protocolVersionField.getText() == null
                 ? "" : protocolVersionField.getText().trim();
         config.setProtocolVersion(protocolVersion.isEmpty()
@@ -435,6 +440,16 @@ public final class ServerEditDialog extends DialogWrapper {
     /** 编辑时用这个拿结果：在保留 id 的前提下覆盖原对象。 */
     public void applyTo(McpServerConfig target) {
         target.applyFrom(buildConfig());
+    }
+
+    private static List<KeyValue> copyHeaders(@Nullable McpServerConfig source) {
+        List<KeyValue> out = new ArrayList<>();
+        if (source != null) {
+            for (KeyValue kv : source.getHeaders()) {
+                out.add(kv.copy());
+            }
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------

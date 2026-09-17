@@ -16,9 +16,12 @@ import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
 import com.tool4j.mcp.model.McpCallResult;
+import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.model.McpTool;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.SchemaUtil;
+
+import org.jetbrains.annotations.Nullable;
 
 import javax.swing.AbstractAction;
 import javax.swing.ActionMap;
@@ -40,11 +43,14 @@ import java.util.List;
 /**
  * 工具详情：描述 + 参数（JSON）+ 调用 + 结果。
  *
- * <p>参数区只有两个页签，<b>JSON 是唯一的输入入口</b>：
+ * <p>参数区是一排页签，<b>JSON 是唯一的输入入口</b>：
  * <ul>
  *   <li><b>JSON</b>：选中工具时按它的 {@code inputSchema} 预填一份模板——声明的每个参数都在，
  *   值取 schema 的 {@code default}，没 default 的按类型给空值。改哪几个值就发哪几个字段，
  *   多余的删掉即可。</li>
+ *   <li><b>请求头</b>（仅 http / sse）：这次请求额外带的头，通常就是 token。
+ *   和参数 JSON 是同一件事的两个面，所以放在同一级页签上（Postman 的 Params / Headers 也是这样排的）。
+ *   它属于<b>服务器</b>而不是某个工具，切工具不动它，见 {@link #showConfig}。</li>
  *   <li><b>定义</b>：工具原始定义（含 annotations 与 outputSchema）。参数的类型、必填、说明、
  *   默认值都能在这里查到，不用另开文档。</li>
  * </ul>
@@ -53,6 +59,9 @@ import java.util.List;
  * 两套输入只让用户多一层"我现在改动的是哪个页签"的心智负担。
  */
 public final class ToolDetailPanel extends JPanel implements Disposable {
+
+    /** 请求头页签在页签栏里的位置：夹在「JSON」和「定义」之间。 */
+    private static final int HEADERS_TAB_INDEX = 1;
 
     /** 调用请求的回调；由主面板实现，负责切后台线程和拿会话。 */
     public interface Callback {
@@ -69,6 +78,8 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     private final EditorTextField jsonEditor;
     private final EditorTextField definitionViewer;
     private final JBTabbedPane tabs = new JBTabbedPane();
+    /** 与 JSON / 定义 并列的第三个页签；只在 http / sse 上存在。 */
+    private final RequestHeadersPanel headersPanel;
     private final ResultView resultView;
     private final JBSplitter splitter;
 
@@ -85,8 +96,12 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         // 编辑器自带 Keymap，面板级的 Ctrl+Enter 到不了它，得挂进编辑器自己身上
         Editors.onInvokeShortcut(jsonEditor, this::invoke);
 
+        headersPanel = new RequestHeadersPanel(project, this);
+        headersPanel.setOnChanged(this::refreshHeadersTitle);
+
         tabs.addTab("JSON", wrapEditor(jsonEditor));
         tabs.addTab("定义", wrapEditor(definitionViewer));
+        // 请求头页签由 showConfig() 按传输类型插入 / 移除，不在这里加
 
         JPanel paramArea = new JPanel(new BorderLayout());
         paramArea.setOpaque(false);
@@ -223,16 +238,88 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         this.callback = callback;
     }
 
+    /**
+     * 绑定当前服务器，并决定「请求头」页签在不在。
+     *
+     * <p>stdio 的子进程没有请求头这回事，整页签移除；http / sse 插到 JSON 与定义之间。
+     * 之所以在这里按传输类型动态增删、而不是开局就固定三页签：一个恒在但永远填不了的空页签，
+     * 比没有这一页更让人疑惑。
+     *
+     * <p>页签位置固定插在 {@link #HEADERS_TAB_INDEX}，这样"JSON 永远是第一个"这件事不会因为
+     * 换了服务器的传输类型而变——肌肉记忆比"页签顺序好看"重要。
+     */
+    public void showConfig(@Nullable McpServerConfig config) {
+        boolean applicable = config != null
+                && config.getTransport() != null && config.getTransport().isHttp();
+        headersPanel.showConfig(applicable ? config : null);
+
+        int index = tabs.indexOfComponent(headersPanel);
+        if (applicable) {
+            if (index < 0) {
+                tabs.insertTab(headersPanel.tabTitle(), null, headersPanel,
+                        "这次请求额外带的请求头，例如 Authorization。只对 http / sse 生效。",
+                        HEADERS_TAB_INDEX);
+                // 插入完成后 JTabbedPane 的选中项可能变成"无选中"，兜一下
+                if (tabs.getSelectedComponent() == null) {
+                    tabs.setSelectedIndex(0);
+                }
+            } else {
+                refreshHeadersTitle();
+            }
+        } else if (index >= 0) {
+            boolean wasSelected = tabs.getSelectedComponent() == headersPanel;
+            tabs.remove(headersPanel);
+            if (wasSelected) {
+                // JTabbedPane 默认会把选中挪给邻页（这里是「定义」），我们更想回到「JSON」
+                tabs.setSelectedIndex(0);
+            }
+        }
+    }
+
+    private void refreshHeadersTitle() {
+        int index = tabs.indexOfComponent(headersPanel);
+        if (index >= 0) {
+            tabs.setTitleAt(index, headersPanel.tabTitle());
+        }
+    }
+
+    /**
+     * 切条目时回到「JSON」页签——点工具之后的下一个动作几乎总是填参数、点调用。
+     *
+     * <p>唯一例外是请求头：它挂在服务器上，和"当前选中的是哪个工具"无关，
+     * 正填 token 的时候被顶走会很烦，所以停在那一页不动。
+     */
+    private void selectDefaultTab() {
+        if (tabs.getSelectedComponent() != headersPanel) {
+            tabs.setSelectedIndex(0);
+        }
+    }
+
     public void clear() {
+        clearContent("从左侧列表里点开任意工具，这里会按它的定义预填一份参数 JSON。"
+                + "参数的类型、必填和说明在「定义」页签里。");
+    }
+
+    /**
+     * 没有选中任何条目时的样子。
+     *
+     * <p><b>为什么这里还留着参数区</b>：请求头页签就住在这个面板里，而"带鉴权的新服务器"
+     * 恰恰是在<b>没连上、树是空的时候</b>需要填 token 的（没 token 就永远连不上）。
+     * 如果没选中工具时切到另一张"欢迎页"，那一页上就没有请求头入口，首次配置会死锁。
+     */
+    public void showIdle(String hint) {
+        clearContent(hint);
+    }
+
+    private void clearContent(String hint) {
         tool = null;
         titleLabel.setText("选择一个工具");
         badgesLabel.setText("");
-        setDescription("从左侧列表里点开任意工具，这里会按它的定义预填一份参数 JSON。"
-                + "参数的类型、必填和说明在「定义」页签里。");
+        setDescription(hint);
         statusLabel.setText("");
         prefillArguments(null);
         definitionViewer.setText("");
-        tabs.setSelectedIndex(0);
+        selectDefaultTab();
         setBusy(false);
         resultView.clear();
     }
@@ -245,7 +332,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         setDescription(description == null || description.isBlank() ? "（该工具没有提供描述）" : description);
         prefillArguments(tool);
         definitionViewer.setText(JsonUtil.pretty(tool.getRaw()));
-        tabs.setSelectedIndex(0);
+        selectDefaultTab();
         statusLabel.setText("");
         setBusy(false);
         resultView.clear();
@@ -282,9 +369,11 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
 
     private void setBusy(boolean value) {
         this.busy = value;
-        invokeButton.setEnabled(!value);
+        // 没选中工具时把调用 / 重置置灰：面板在空态下也会显示（请求头页签要用），
+        // 一个亮着但按了没反应的「调用」比置灰更让人困惑
+        invokeButton.setEnabled(!value && tool != null);
         invokeButton.setText(value ? "调用中…" : "调用");
-        resetButton.setEnabled(!value);
+        resetButton.setEnabled(!value && tool != null);
     }
 
     private static String badges(McpTool tool) {

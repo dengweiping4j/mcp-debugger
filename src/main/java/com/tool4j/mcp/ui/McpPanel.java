@@ -289,7 +289,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         bodySplit.setSecondComponent(console);
 
         applyLogVisibility();
-        showCard(CARD_EMPTY);
+        showIdle();
         return bodySplit;
     }
 
@@ -322,7 +322,11 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     }
 
     /**
-     * 空态卡片。文案刻意写成短行 + HTML 定宽 div：右侧边栏只有两三百像素，
+     * 开场引导页：<b>一个服务器都没配</b>时才出现。
+     *
+     * <p>已经有服务器但没连上时不走这里，见 {@link #showIdle()}——那张页面要留着请求头入口。
+     *
+     * <p>文案刻意写成短行 + HTML 定宽 div：右侧边栏只有两三百像素，
      * 不限制宽度的话这段话会被撑成一条横线（甚至把面板顶宽）。
      *
      * <p>顺便把"第一次怎么开始"做成两个真按钮——新用户在这个空页面上最需要的就是这个。
@@ -340,9 +344,9 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         title.setAlignmentX(Component.CENTER_ALIGNMENT);
 
         JBLabel hint = new JBLabel("<html><div style='text-align:center;width:176px'>"
-                + "连接服务器后，这里会按工具的<br>"
-                + "入参 Schema 生成表单，填好点「调用」<br>"
-                + "就能看到结果。"
+                + "连接服务器后，左侧会列出它的工具，<br>"
+                + "右边按工具的入参 Schema 预填一份<br>"
+                + "参数 JSON，填好点「调用」就有结果。"
                 + "</div></html>");
         hint.setForeground(Ui.MUTED);
         hint.setFont(Ui.smaller(hint.getFont()));
@@ -365,10 +369,6 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         content.add(addButton);
         content.add(Ui.vgap(6));
         content.add(importButton);
-        content.add(Ui.vgap(2));
-        content.add(new JBLabel("<html><div style='text-align:center;width:176px'>"
-                + "也可以直接点左侧列表里的工具<br>开始调试。"
-                + "</div></html>"));
         panel.add(content);
         return panel;
     }
@@ -516,7 +516,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         console.appendInfo("正在连接 " + config.getDisplayName() + "（" + config.getTransport().getDisplayName()
                 + "）· " + config.getEndpointSummary());
         if (userInitiated) {
-            showCard(CARD_EMPTY);
+            showIdle();
         }
 
         Bg.run(project, "连接 MCP 服务器 " + config.getDisplayName(), true,
@@ -663,6 +663,10 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     private void rebuildTree() {
         treeRoot.removeAllChildren();
         McpServerConfig config = currentConfig();
+        // 「请求头」页签跟着当前服务器走：stdio 没有这一页，http / sse 才插到 JSON 与定义之间。
+        // 这个重排很频繁（连接、刷新、切工具都会走到这），所以面板内部对"同一个配置实例"
+        // 只刷新提示文字，不会把用户正敲到一半的内容和光标打回去。
+        toolDetail.showConfig(config);
         McpClient client = config == null ? null : service.peek(config.getId());
         boolean connected = client != null && client.isConnected();
 
@@ -678,11 +682,33 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         if (connected) {
             expandAll();
         } else {
-            showCard(CARD_EMPTY);
+            showIdle();
         }
 
         updateHeader(connected, client);
         updateStatus();
+    }
+
+    /**
+     * 没有条目可显示时给哪张卡片。
+     *
+     * <p>一个服务器都没配 → 开场引导页（新建 / 导入），这是新用户唯一该看到的东西。
+     *
+     * <p>已经有服务器、只是没连上（或没选中条目）→ 直接给工具详情面板的空态。
+     * 这不是偷懒：<b>请求头页签就住在那个面板里</b>，而带鉴权的新服务器恰恰是在
+     * "还没连上、树是空的"这一刻需要填 token 的（没有 token 就永远连不上）。
+     * 如果这时换成另一张欢迎页，那一页上没有任何请求头入口，首次配置就会死锁。
+     */
+    private void showIdle() {
+        McpServerConfig config = currentConfig();
+        if (config == null) {
+            showCard(CARD_EMPTY);
+            return;
+        }
+        toolDetail.showIdle(service.isConnected(config.getId())
+                ? "从左侧列表里点开任意工具，这里会按它的定义预填一份参数 JSON。"
+                : "还没有连上。先在工具栏点「连接」；带鉴权的服务端先到「请求头」页签填好 token 再连。");
+        showCard(CARD_TOOL);
     }
 
     /** 空分组不显示，免得列表里一堆 0。 */
@@ -732,7 +758,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
             promptDetail.showPrompt(prompt);
             showCard(CARD_PROMPT);
         } else {
-            showCard(CARD_EMPTY);
+            showIdle();
         }
     }
 
