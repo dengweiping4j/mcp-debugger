@@ -2,6 +2,7 @@ package com.tool4j.mcp.transport;
 
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.protocol.JsonRpc;
 import com.tool4j.mcp.protocol.JsonUtil;
@@ -49,7 +50,7 @@ public class StdioTransport extends AbstractTransport {
     public void start() throws McpException {
         String command = config.getCommand();
         if (command == null || command.isBlank()) {
-            throw new McpException("未配置启动命令");
+            throw new McpException(I18n.t("err.stdio.noCommand"));
         }
 
         List<String> argv = new ArrayList<>();
@@ -71,7 +72,7 @@ public class StdioTransport extends AbstractTransport {
         if (!dir.isEmpty()) {
             File f = new File(dir);
             if (!f.isDirectory()) {
-                throw new McpException("工作目录不存在：" + dir);
+                throw new McpException(I18n.t("err.stdio.badWorkDir", dir));
             }
             pb.directory(f);
         }
@@ -79,15 +80,14 @@ public class StdioTransport extends AbstractTransport {
         try {
             process = pb.start();
         } catch (IOException e) {
-            throw new McpException("启动子进程失败：" + JsonUtil.rootMessage(e)
-                    + "\n命令：" + String.join(" ", argv)
-                    + "\n（若提示找不到命令，请确认该命令在 PATH 中，或填写绝对路径）", e);
+            throw new McpException(I18n.t("err.stdio.spawnFailed",
+                    JsonUtil.rootMessage(e), String.join(" ", argv)), e);
         }
 
         stdin = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         daemonThread("mcp-stdio-out-" + shortId(), this::readStdout).start();
         daemonThread("mcp-stdio-err-" + shortId(), this::readStderr).start();
-        reportNotice("已启动子进程：pid=" + process.pid() + " → " + String.join(" ", argv));
+        reportNotice(I18n.t("err.stdio.started", process.pid(), String.join(" ", argv)));
     }
 
     // ------------------------------------------------------------------
@@ -103,26 +103,26 @@ public class StdioTransport extends AbstractTransport {
                 }
                 if (!text.startsWith("{")) {
                     // 子进程的启动日志、进度输出等等：留着看，但不参与协议
-                    reportNotice("stdout(非协议输出)：" + JsonUtil.firstLine(text));
+                    reportNotice(I18n.t("err.stdio.stdout", JsonUtil.firstLine(text)));
                     continue;
                 }
                 JsonObject message;
                 try {
                     message = JsonUtil.parse(text).getAsJsonObject();
                 } catch (RuntimeException e) {
-                    reportNotice("stdout 报文解析失败，已忽略：" + JsonUtil.firstLine(text));
+                    reportNotice(I18n.t("err.stdio.stdoutUnparsable", JsonUtil.firstLine(text)));
                     continue;
                 }
                 handleIncoming(message);
             }
         } catch (IOException e) {
             if (!userClosed) {
-                reportNotice("stdout 读取异常：" + JsonUtil.rootMessage(e));
+                reportNotice(I18n.t("err.stdio.stdoutReadFailed", JsonUtil.rootMessage(e)));
             }
         }
         // stdout 关闭 == 子进程结束了
         if (!userClosed) {
-            String reason = "MCP 服务端进程已退出" + exitSuffix();
+            String reason = I18n.t("err.stdio.exited", exitSuffix());
             failPending(reason);
             reportClosedOnce(reason);
         }
@@ -134,7 +134,7 @@ public class StdioTransport extends AbstractTransport {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (!line.isBlank()) {
-                    reportNotice("stderr：" + line);
+                    reportNotice(I18n.t("err.stdio.stderr", line));
                 }
             }
         } catch (IOException ignored) {
@@ -145,11 +145,11 @@ public class StdioTransport extends AbstractTransport {
     private String exitSuffix() {
         Process p = process;
         if (p == null) {
-            return "（进程未启动）";
+            return I18n.t("err.stdio.notRunning");
         }
         try {
             if (!p.isAlive()) {
-                return "（exitCode=" + p.exitValue() + "）";
+                return I18n.t("err.stdio.exitCode", p.exitValue());
             }
         } catch (IllegalThreadStateException ignored) {
             // 刚好还在跑
@@ -164,7 +164,7 @@ public class StdioTransport extends AbstractTransport {
         ensureRunning();
         Long id = JsonRpc.idAsLong(request);
         if (id == null) {
-            throw new McpException("内部错误：stdio 请求缺少数字 id");
+            throw new McpException(I18n.t("err.common.missingId", "stdio"));
         }
         String method = JsonRpc.methodOf(request);
         // 先注册再发送：响应完全可能在我们写完 stdout 的瞬间就回来了
@@ -193,22 +193,21 @@ public class StdioTransport extends AbstractTransport {
                 stdin.write('\n');
                 stdin.flush();
             } catch (IOException e) {
-                throw new McpException("向服务端进程写入失败：" + JsonUtil.rootMessage(e)
-                        + "（子进程可能已经退出）", e);
+                throw new McpException(I18n.t("err.stdio.writeFailed", JsonUtil.rootMessage(e)), e);
             }
         }
     }
 
     private void ensureRunning() throws McpException {
         if (userClosed) {
-            throw new McpException("连接已关闭");
+            throw new McpException(I18n.t("err.common.closed"));
         }
         Process p = process;
         if (p == null) {
-            throw new McpException("子进程尚未启动");
+            throw new McpException(I18n.t("err.stdio.notStarted"));
         }
         if (!p.isAlive()) {
-            throw new McpException("服务端进程已经退出" + exitSuffix());
+            throw new McpException(I18n.t("err.stdio.alreadyExited", exitSuffix()));
         }
     }
 
@@ -226,7 +225,7 @@ public class StdioTransport extends AbstractTransport {
     @Override
     public void close() {
         userClosed = true;
-        failPending("连接已关闭");
+        failPending(I18n.t("err.common.closed"));
         Process p = process;
         if (p != null) {
             closeQuietly(stdin);

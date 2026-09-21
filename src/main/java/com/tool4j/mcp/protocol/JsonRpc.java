@@ -5,6 +5,8 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
+import com.tool4j.mcp.i18n.I18n;
+
 /**
  * JSON-RPC 2.0 报文构造/识别。
  *
@@ -128,7 +130,7 @@ public final class JsonRpc {
     /** 把 {@code error} 对象转成一句人话。 */
     public static String describeError(JsonObject error) {
         if (error == null) {
-            return "未知错误";
+            return I18n.t("rpc.error.unknown");
         }
         String msg = JsonUtil.str(error, "message", "");
         Integer code = error.has("code") && error.get("code").isJsonPrimitive()
@@ -137,27 +139,27 @@ public final class JsonRpc {
         if (code != null) {
             sb.append("[").append(code).append("] ");
         }
-        sb.append(msg.isBlank() ? "服务端返回错误" : msg);
+        sb.append(msg.isBlank() ? I18n.t("rpc.error.serverReturned") : msg);
         JsonElement data = error.get("data");
         if (data != null && !data.isJsonNull()) {
             String d = data.isJsonPrimitive() ? data.getAsString() : JsonUtil.compact(data);
             if (d != null && !d.isBlank() && !msg.contains(d)) {
-                sb.append(" — ").append(JsonUtil.firstLine(d));
+                sb.append(I18n.t("rpc.error.dataSuffix", JsonUtil.firstLine(d)));
             }
         }
         return sb.toString();
     }
 
-    /** 方法名 → 规范里的中文说明，界面提示用。 */
+    /** JSON-RPC 错误码 → 规范里的说明，界面提示用。 */
     public static String describeErrorCode(int code) {
         return switch (code) {
-            case PARSE_ERROR -> "报文解析失败";
-            case INVALID_REQUEST -> "请求格式非法";
-            case METHOD_NOT_FOUND -> "服务端不支持该方法";
-            case INVALID_PARAMS -> "参数非法";
-            case INTERNAL_ERROR -> "服务端内部错误";
-            case MCP_RESOURCE_NOT_FOUND -> "资源不存在";
-            default -> "错误";
+            case PARSE_ERROR -> I18n.t("rpc.errorCode.parse");
+            case INVALID_REQUEST -> I18n.t("rpc.errorCode.invalidRequest");
+            case METHOD_NOT_FOUND -> I18n.t("rpc.errorCode.methodNotFound");
+            case INVALID_PARAMS -> I18n.t("rpc.errorCode.invalidParams");
+            case INTERNAL_ERROR -> I18n.t("rpc.errorCode.internal");
+            case MCP_RESOURCE_NOT_FOUND -> I18n.t("rpc.errorCode.resourceNotFound");
+            default -> I18n.t("rpc.errorCode.other");
         };
     }
 }

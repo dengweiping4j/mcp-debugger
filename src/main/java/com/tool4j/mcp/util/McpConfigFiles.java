@@ -1,5 +1,7 @@
 package com.tool4j.mcp.util;
 
+import com.tool4j.mcp.i18n.I18n;
+
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,19 +22,24 @@ public final class McpConfigFiles {
 
     /** 一个被发现（且确实存在）的候选配置文件。 */
     public static final class Candidate {
-        private final String label;
+        private final String labelKey;
+        private final String labelArg;
+        private final String fileName;
         private final File file;
         private final boolean projectScoped;
 
-        Candidate(String label, File file, boolean projectScoped) {
-            this.label = label;
+        Candidate(String labelKey, String labelArg, String fileName, File file, boolean projectScoped) {
+            this.labelKey = labelKey;
+            this.labelArg = labelArg;
+            this.fileName = fileName;
             this.file = file;
             this.projectScoped = projectScoped;
         }
 
-        /** 例如 {@code 当前工程 · .mcp.json}。 */
+        /** 例如 {@code 当前工程 · .mcp.json}。切换界面语言后再次调用会给出新语言的文案。 */
         public String getLabel() {
-            return label;
+            String head = labelArg == null ? I18n.t(labelKey) : I18n.t(labelKey, labelArg);
+            return head + " · " + fileName;
         }
 
         public File getFile() {
@@ -49,7 +56,7 @@ public final class McpConfigFiles {
 
         @Override
         public String toString() {
-            return label;
+            return getLabel();
         }
     }
 
@@ -65,49 +72,50 @@ public final class McpConfigFiles {
 
         if (projectBasePath != null && !projectBasePath.isBlank()) {
             Path base = Path.of(projectBasePath);
-            add(out, seen, "当前工程", true, base.resolve(".mcp.json"));
-            add(out, seen, "当前工程 (Claude Code)", true, base.resolve(".claude.json"));
-            add(out, seen, "当前工程 (Cursor)", true, base.resolve(".cursor").resolve("mcp.json"));
-            add(out, seen, "当前工程 (VS Code)", true, base.resolve(".vscode").resolve("mcp.json"));
-            add(out, seen, "当前工程 (Roo)", true, base.resolve(".roo").resolve("mcp.json"));
-            add(out, seen, "当前工程 (Kiro)", true, base.resolve(".kiro").resolve("settings").resolve("mcp.json"));
-            add(out, seen, "当前工程 (Gemini CLI)", true, base.resolve(".gemini").resolve("settings.json"));
-            add(out, seen, "当前工程", true, base.resolve("mcp.json"));
+            add(out, seen, "cfg.file.project", null, true, base.resolve(".mcp.json"));
+            add(out, seen, "cfg.file.projectApp", "Claude Code", true, base.resolve(".claude.json"));
+            add(out, seen, "cfg.file.projectApp", "Cursor", true, base.resolve(".cursor").resolve("mcp.json"));
+            add(out, seen, "cfg.file.projectApp", "VS Code", true, base.resolve(".vscode").resolve("mcp.json"));
+            add(out, seen, "cfg.file.projectApp", "Roo", true, base.resolve(".roo").resolve("mcp.json"));
+            add(out, seen, "cfg.file.projectApp", "Kiro", true, base.resolve(".kiro").resolve("settings").resolve("mcp.json"));
+            add(out, seen, "cfg.file.projectApp", "Gemini CLI", true, base.resolve(".gemini").resolve("settings.json"));
+            add(out, seen, "cfg.file.project", null, true, base.resolve("mcp.json"));
         }
 
         String home = System.getProperty("user.home", "");
         if (!home.isBlank()) {
             Path h = Path.of(home);
-            add(out, seen, "Cursor (全局)", false, h.resolve(".cursor").resolve("mcp.json"));
-            add(out, seen, "Windsurf", false, h.resolve(".codeium").resolve("windsurf").resolve("mcp_config.json"));
-            add(out, seen, "Gemini CLI (全局)", false, h.resolve(".gemini").resolve("settings.json"));
-            add(out, seen, "Kiro (全局)", false, h.resolve(".kiro").resolve("settings").resolve("mcp.json"));
-            add(out, seen, "Amazon Q", false, h.resolve(".aws").resolve("amazonq").resolve("mcp.json"));
-            add(out, seen, "Claude Desktop", false,
+            add(out, seen, "cfg.file.globalApp", "Cursor", false, h.resolve(".cursor").resolve("mcp.json"));
+            addBrand(out, seen, "Windsurf", false, h.resolve(".codeium").resolve("windsurf").resolve("mcp_config.json"));
+            add(out, seen, "cfg.file.globalApp", "Gemini CLI", false, h.resolve(".gemini").resolve("settings.json"));
+            add(out, seen, "cfg.file.globalApp", "Kiro", false, h.resolve(".kiro").resolve("settings").resolve("mcp.json"));
+            addBrand(out, seen, "Amazon Q", false, h.resolve(".aws").resolve("amazonq").resolve("mcp.json"));
+            addBrand(out, seen, "Claude Desktop", false,
                     h.resolve("Library").resolve("Application Support").resolve("Claude").resolve("claude_desktop_config.json"));
         }
 
         String appData = System.getenv("APPDATA");
         if (appData != null && !appData.isBlank()) {
             Path a = Path.of(appData);
-            add(out, seen, "Claude Desktop", false, a.resolve("Claude").resolve("claude_desktop_config.json"));
-            add(out, seen, "Cursor (全局)", false, a.resolve("Cursor").resolve("mcp.json"));
+            addBrand(out, seen, "Claude Desktop", false, a.resolve("Claude").resolve("claude_desktop_config.json"));
+            add(out, seen, "cfg.file.globalApp", "Cursor", false, a.resolve("Cursor").resolve("mcp.json"));
         }
         String xdgConfig = System.getenv("XDG_CONFIG_HOME");
         if (xdgConfig != null && !xdgConfig.isBlank()) {
-            add(out, seen, "Claude Desktop (XDG)", false,
+            addBrand(out, seen, "Claude Desktop (XDG)", false,
                     Path.of(xdgConfig).resolve("Claude").resolve("claude_desktop_config.json"));
         }
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
             if (!home.isBlank()) {
-                add(out, seen, "Claude Desktop (Linux)", false,
+                addBrand(out, seen, "Claude Desktop (Linux)", false,
                         Path.of(home).resolve(".config").resolve("Claude").resolve("claude_desktop_config.json"));
             }
         }
         return out;
     }
 
-    private static void add(List<Candidate> out, Set<String> seen, String label, boolean projectScoped, Path path) {
+    private static void add(List<Candidate> out, Set<String> seen, String labelKey, String labelArg,
+                            boolean projectScoped, Path path) {
         File file = path.toFile();
         if (!file.isFile()) {
             return;
@@ -117,7 +125,13 @@ public final class McpConfigFiles {
             return;
         }
         String shown = path.getFileName() == null ? path.toString() : path.getFileName().toString();
-        out.add(new Candidate(label + " · " + shown, file, projectScoped));
+        out.add(new Candidate(labelKey, labelArg, shown, file, projectScoped));
+    }
+
+    /** 品牌专名不做翻译，走恒等模板。 */
+    private static void addBrand(List<Candidate> out, Set<String> seen, String brand,
+                                 boolean projectScoped, Path path) {
+        add(out, seen, "cfg.file.brand", brand, projectScoped, path);
     }
 
     public static String readQuietly(File file) {

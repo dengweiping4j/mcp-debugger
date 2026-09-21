@@ -2,6 +2,7 @@ package com.tool4j.mcp.model;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.JsonUtil;
 import lombok.Getter;
 
@@ -26,11 +27,25 @@ public class McpTool {
 
     public McpTool(JsonObject raw) {
         this.raw = raw == null ? new JsonObject() : raw;
-        this.name = JsonUtil.str(this.raw, "name", "(未命名工具)");
+        this.name = JsonUtil.str(this.raw, "name", null);
         this.title = JsonUtil.str(this.raw, "title", null);
         this.description = JsonUtil.str(this.raw, "description", null);
         this.inputSchema = asObject(this.raw.get("inputSchema"));
         this.outputSchema = asObject(this.raw.get("outputSchema"));
+    }
+
+    /**
+     * 工具名。<b>兜底值在取用时才本地化</b>，不存进字段。
+     *
+     * <p>存字段的话，切语言时已经加载好的对象上会留着旧语言的文案——这类"把本地化字符串
+     * 存进 POJO"的写法是双语功能最常见的漏水点。清单渲染器每次绘制都会调它，所以就地取词
+     * 能自动跟着语言变。
+     *
+     * <p>（代价：名称为空的畸形工具，其调用历史的归类键会跟着语言变。这种服务端本身已经不正常，
+     * 不值得为它把键做成不本地化的哨兵值。）
+     */
+    public String getName() {
+        return name == null || name.isBlank() ? I18n.t("model.tool.unnamed") : name;
     }
 
     private static JsonObject asObject(JsonElement e) {
@@ -78,6 +93,6 @@ public class McpTool {
 
     @Override
     public String toString() {
-        return name;
+        return getName();
     }
 }

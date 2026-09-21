@@ -2,6 +2,7 @@ package com.tool4j.mcp.transport;
 
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.JsonRpc;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.McpException;
@@ -118,17 +119,16 @@ public abstract class AbstractTransport implements McpTransport {
         try {
             return box.get(Math.max(1000L, timeoutMillis), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            throw new McpException("调用 " + method + " 超时：服务端在 " + (timeoutMillis / 1000)
-                    + " 秒内没有返回响应（可在服务器配置里调大超时时间）");
+            throw new McpException(I18n.t("err.call.timeout", method, timeoutMillis / 1000));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new McpException("调用 " + method + " 被中断");
+            throw new McpException(I18n.t("err.call.interrupted", method));
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof McpException me) {
                 throw me;
             }
-            throw new McpException("调用 " + method + " 失败：" + JsonUtil.rootMessage(e), cause);
+            throw new McpException(I18n.t("err.call.failed", method, JsonUtil.rootMessage(e)), cause);
         } finally {
             pending.remove(id);
         }
@@ -179,16 +179,16 @@ public abstract class AbstractTransport implements McpTransport {
     protected static String describeIoFailure(IOException e) {
         for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
             if (t instanceof java.net.ConnectException) {
-                return "无法建立连接——服务端没在运行，或地址/端口不对";
+                return I18n.t("err.io.connect");
             }
             if (t instanceof java.net.UnknownHostException) {
-                return "无法解析主机名：" + t.getMessage();
+                return I18n.t("err.io.unknownHost", t.getMessage());
             }
             if (t instanceof java.net.SocketTimeoutException) {
-                return "连接超时——服务端没响应";
+                return I18n.t("err.io.connectTimeout");
             }
             if (t instanceof javax.net.ssl.SSLException) {
-                return "TLS 握手失败：" + t.getMessage();
+                return I18n.t("err.io.tls", t.getMessage());
             }
         }
         return JsonUtil.rootMessage(e);

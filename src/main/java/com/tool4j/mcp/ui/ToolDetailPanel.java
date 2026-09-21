@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.EditorTextField;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.JBSplitter;
@@ -15,9 +16,11 @@ import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpCallResult;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.model.McpTool;
+import com.tool4j.mcp.model.ToolCallRecord;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.SchemaUtil;
 
@@ -53,6 +56,8 @@ import java.util.List;
  *   它属于<b>服务器</b>而不是某个工具，切工具不动它，见 {@link #showConfig}。</li>
  *   <li><b>定义</b>：工具原始定义（含 annotations 与 outputSchema）。参数的类型、必填、说明、
  *   默认值都能在这里查到，不用另开文档。</li>
+ *   <li><b>历史</b>：这个工具每次调用的入参，点条目即填回 JSON 页签，见 {@link CallHistoryPanel}。
+ *   它也是挂在<b>工具</b>上的（不是服务器），切工具换一份。</li>
  * </ul>
  *
  * <p>原先还有个「参数」表单页签，已移除：它和 JSON 页签表达的是同一件事，
@@ -72,14 +77,27 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     private final JBLabel badgesLabel = Ui.hint(" ");
     private final JBTextArea descriptionArea = new JBTextArea();
     private final JBLabel statusLabel = Ui.hint("");
-    private final JButton invokeButton = new JButton("调用");
-    private final JButton resetButton = new JButton("重置");
+    private final JButton invokeButton = new JButton(I18n.t("tool.action.invoke"));
+    private final JButton resetButton = new JButton("");
+    /** 图标按钮（重置 / 美化）——只有 tooltip，所以文案要能跟着语言换。 */
+    private final JButton formatButton = new JButton(AllIcons.Actions.ReformatCode);
 
     private final EditorTextField jsonEditor;
     private final EditorTextField definitionViewer;
+    /**
+     * 加进页签的是 {@link #wrapEditor} 包出来的容器，<b>不是编辑器本身</b>。
+     *
+     * <p>所以换标题必须拿这两个容器去 {@code indexOfComponent}——拿编辑器去找会返回 -1，
+     * {@code setTitleAt} 静默不执行，表现为"切语言后「JSON」「定义」两个页签还是旧语言"
+     * （「历史」是直接加进去的，没这个问题，所以只有这两个中招）。
+     */
+    private final JComponent jsonTab;
+    private final JComponent definitionTab;
     private final JBTabbedPane tabs = new JBTabbedPane();
     /** 与 JSON / 定义 并列的第三个页签；只在 http / sse 上存在。 */
     private final RequestHeadersPanel headersPanel;
+    /** 与 JSON / 定义 并列的最后一个页签：这个工具的历史入参。 */
+    private final CallHistoryPanel historyPanel;
     private final ResultView resultView;
     private final JBSplitter splitter;
 
@@ -87,9 +105,39 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     private Callback callback;
     private boolean busy;
 
+    // ---------------- 可重贴的文案状态 ----------------
+
+    /**
+     * 空态提示语的来源。<b>存键而不是存成品字符串</b>，否则切到另一种语言之后
+     * 这块说明会停在旧语言里（它不是某个操作的结果，没人会再去刷新它）。
+     */
+    @Nullable
+    private String idleKey;
+    /** 外面直接给现成文本时走这里（{@link #showIdle(String)}）。 */
+    @Nullable
+    private String idleText;
+
+    /**
+     * 状态栏那句话的<b>状态</b>，而不是拼好的字符串。
+     *
+     * <p>状态栏上的字是拼出来的（参数个数、毫秒、历史时间戳），存字符串就只能在
+     * 语言切换后留在旧语言。所以这里存状态 + 变量部分，{@link #renderStatus()}
+     * 每次按当前语言重新拼一遍。
+     */
+    private enum StatusKind { NONE, HISTORY, BAD_JSON, CALLING, FAILED, TOOL_ERROR, DONE }
+
+    private StatusKind statusKind = StatusKind.NONE;
+    /** 状态文案里的变量部分（时间、参数个数、毫秒、JSON 解析错误）。 */
+    @Nullable
+    private String statusArg;
+
     public ToolDetailPanel(Project project, Disposable parent) {
         super(new BorderLayout());
         setOpaque(false);
+        // 把自己也挂到父级上：dispose() 要收掉结果区的定时器，并注销「历史」页签订阅的
+        // 历史变更广播。不挂的话这个 panel 永远不会被 dispose，关掉工具窗口再打开
+        // 就会留下一个仍在收消息的旧实例（它引着整棵树，等于每次重开都漏一份）。
+        Disposer.register(parent, this);
 
         jsonEditor = Editors.sized(Editors.jsonEditor(project, "", parent), 260);
         definitionViewer = Editors.sized(Editors.jsonViewer(project, "", parent), 260);
@@ -99,8 +147,17 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         headersPanel = new RequestHeadersPanel(project, this);
         headersPanel.setOnChanged(this::refreshHeadersTitle);
 
-        tabs.addTab("JSON", wrapEditor(jsonEditor));
-        tabs.addTab("定义", wrapEditor(definitionViewer));
+        historyPanel = new CallHistoryPanel(project, this);
+        historyPanel.setOnLoad(this::loadArguments);
+        historyPanel.setOnChanged(this::refreshHistoryTitle);
+
+        jsonTab = wrapEditor(jsonEditor);
+        definitionTab = wrapEditor(definitionViewer);
+        tabs.addTab(I18n.t("tool.tab.json"), jsonTab);
+        tabs.addTab(I18n.t("tool.tab.definition"), definitionTab);
+        // 「历史」排在最后：它是"回头看看上次怎么填的"，属于辅助入口，
+        // 不该把「JSON」「请求头」这些"这次要发什么"挤到后面去
+        tabs.addTab(I18n.t("tool.tab.history"), historyPanel);
         // 请求头页签由 showConfig() 按传输类型插入 / 移除，不在这里加
 
         JPanel paramArea = new JPanel(new BorderLayout());
@@ -176,24 +233,22 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
      * 在右侧边栏里三个文字按钮能吃掉大半个宽度，把状态文字挤到看不见。
      */
     private JComponent buildActionRow() {
-        invokeButton.setToolTipText("调用该工具（Ctrl+Enter）");
+        invokeButton.setToolTipText(I18n.t("tool.action.invoke.tip"));
         invokeButton.addActionListener(e -> invoke());
 
         resetButton.setIcon(AllIcons.General.Reset);
-        resetButton.setText("");
-        resetButton.setToolTipText("重置为按工具定义生成的参数");
+        resetButton.setToolTipText(I18n.t("tool.action.reset.tip"));
         resetButton.setMargin(JBUI.insets(2, 4, 2, 4));
         resetButton.setFocusable(false);
         resetButton.addActionListener(e -> {
             prefillArguments(tool);
-            statusLabel.setText("");
+            setStatus(StatusKind.NONE, null);
         });
 
-        JButton formatJson = new JButton(AllIcons.Actions.ReformatCode);
-        formatJson.setToolTipText("JSON字符串美化");
-        formatJson.setMargin(JBUI.insets(2, 4, 2, 4));
-        formatJson.setFocusable(false);
-        formatJson.addActionListener(e -> {
+        formatButton.setToolTipText(I18n.t("tool.action.format.tip"));
+        formatButton.setMargin(JBUI.insets(2, 4, 2, 4));
+        formatButton.setFocusable(false);
+        formatButton.addActionListener(e -> {
             String text = jsonEditor.getText();
             if (text != null && !text.isBlank()) {
                 jsonEditor.setText(JsonUtil.formatLenient(text));
@@ -207,7 +262,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         left.add(Ui.hgap(4));
         left.add(resetButton);
         left.add(Ui.hgap(2));
-        left.add(formatJson);
+        left.add(formatButton);
 
         JPanel row = new JPanel(new BorderLayout(JBUI.scale(6), 0));
         row.setOpaque(false);
@@ -252,12 +307,14 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         boolean applicable = config != null
                 && config.getTransport() != null && config.getTransport().isHttp();
         headersPanel.showConfig(applicable ? config : null);
+        // 历史页签三件传输都要：它记的是"调过什么"，和请求头适不适用无关
+        historyPanel.showConfig(config);
 
         int index = tabs.indexOfComponent(headersPanel);
         if (applicable) {
             if (index < 0) {
                 tabs.insertTab(headersPanel.tabTitle(), null, headersPanel,
-                        "这次请求额外带的请求头，例如 Authorization。只对 http / sse 生效。",
+                        I18n.t("tool.tab.headers.tip"),
                         HEADERS_TAB_INDEX);
                 // 插入完成后 JTabbedPane 的选中项可能变成"无选中"，兜一下
                 if (tabs.getSelectedComponent() == null) {
@@ -280,11 +337,39 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         int index = tabs.indexOfComponent(headersPanel);
         if (index >= 0) {
             tabs.setTitleAt(index, headersPanel.tabTitle());
+            tabs.setToolTipTextAt(index, I18n.t("tool.tab.headers.tip"));
+        }
+    }
+
+    /** 历史页签标题上的条数变了（新调用记入、删除、清空都会走到这）。 */
+    private void refreshHistoryTitle() {
+        int index = tabs.indexOfComponent(historyPanel);
+        if (index >= 0) {
+            tabs.setTitleAt(index, historyPanel.tabTitle());
         }
     }
 
     /**
-     * 切条目时回到「JSON」页签——点工具之后的下一个动作几乎总是填参数、点调用。
+     * 「历史」页签点条目后，把那次调用的入参填回 JSON 编辑区，<b>并切回「JSON」页签</b>。
+     *
+     * <p>改写的是隔壁页签里的内容，停在历史页上只会看到"点了没反应"（这一页的列表本身一点没变），
+     * 用户很容易以为点空了。切过去，改动就在眼前；「调用」也就在页签上方那条动作栏上，
+     * 可以直接 Ctrl+Enter 重发。
+     *
+     * <p>代价是覆盖掉编辑器里原有的内容，所以动作栏上那句话必须写出来（它也在页签之外，
+     * 提示的时候历史页已经不在眼前了）。覆盖可撤销：{@code EditorTextField.setText}
+     * 走的是编辑器命令，落在撤销栈上，Ctrl+Z 能找回来。
+     */
+    private void loadArguments(JsonObject arguments, ToolCallRecord record) {
+        jsonEditor.setText(JsonUtil.pretty(arguments));
+        jsonEditor.setCaretPosition(0);
+        selectDefaultTab();
+        setStatus(StatusKind.HISTORY, CallHistoryPanel.timeLabel(record.timestamp));
+    }
+
+    /**
+     * 回到「JSON」页签。两个调用点：换工具之后、从「历史」带入入参之后——
+     * 这两处的下一个动作几乎总是填参数、点调用。
      *
      * <p>唯一例外是请求头：它挂在服务器上，和"当前选中的是哪个工具"无关，
      * 正填 token 的时候被顶走会很烦，所以停在那一页不动。
@@ -296,8 +381,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     }
 
     public void clear() {
-        clearContent("从左侧列表里点开任意工具，这里会按它的定义预填一份参数 JSON。"
-                + "参数的类型、必填和说明在「定义」页签里。");
+        showIdleKey("tool.idle.guidance");
     }
 
     /**
@@ -308,34 +392,63 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
      * 如果没选中工具时切到另一张"欢迎页"，那一页上就没有请求头入口，首次配置会死锁。
      */
     public void showIdle(String hint) {
-        clearContent(hint);
+        idleKey = null;
+        idleText = hint;
+        clearContent();
     }
 
-    private void clearContent(String hint) {
+    /**
+     * 空态提示语走文案键的入口。
+     *
+     * <p>主面板用这个而不是 {@link #showIdle(String)}：提示语是这块面板的常驻文案，
+     * 切语言时它得跟着换，所以必须留得住"键"而不是一个已经渲染好的句子。
+     */
+    public void showIdleKey(String hintKey) {
+        idleKey = hintKey;
+        idleText = null;
+        clearContent();
+    }
+
+    private void clearContent() {
         tool = null;
-        titleLabel.setText("选择一个工具");
+        titleLabel.setText(I18n.t("tool.title.none"));
         badgesLabel.setText("");
-        setDescription(hint);
-        statusLabel.setText("");
+        setDescription(idleHintText());
+        setStatus(StatusKind.NONE, null);
         prefillArguments(null);
         definitionViewer.setText("");
+        historyPanel.showTool(null);
         selectDefaultTab();
         setBusy(false);
         resultView.clear();
+    }
+
+    private String idleHintText() {
+        if (idleKey != null) {
+            return I18n.t(idleKey);
+        }
+        return idleText == null ? "" : idleText;
     }
 
     public void showTool(McpTool tool) {
         this.tool = tool;
         titleLabel.setText(tool.getName());
         badgesLabel.setText(badges(tool));
-        String description = tool.getDescription();
-        setDescription(description == null || description.isBlank() ? "（该工具没有提供描述）" : description);
+        setDescription(toolDescription(tool));
         prefillArguments(tool);
         definitionViewer.setText(JsonUtil.pretty(tool.getRaw()));
+        historyPanel.showTool(tool);
         selectDefaultTab();
-        statusLabel.setText("");
+        setStatus(StatusKind.NONE, null);
         setBusy(false);
         resultView.clear();
+    }
+
+    /** 工具描述；服务端没给描述时补一句，别留一片空白。 */
+    private static String toolDescription(McpTool tool) {
+        String description = tool.getDescription();
+        return description == null || description.isBlank()
+                ? I18n.t("tool.description.none") : description;
     }
 
     /**
@@ -372,23 +485,24 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         // 没选中工具时把调用 / 重置置灰：面板在空态下也会显示（请求头页签要用），
         // 一个亮着但按了没反应的「调用」比置灰更让人困惑
         invokeButton.setEnabled(!value && tool != null);
-        invokeButton.setText(value ? "调用中…" : "调用");
+        invokeButton.setText(I18n.t(value ? "tool.action.invoking" : "tool.action.invoke"));
         resetButton.setEnabled(!value && tool != null);
     }
 
     private static String badges(McpTool tool) {
         List<String> parts = new ArrayList<>();
+        // badge 之间的 "  ·  " 两种语言都是这个形态，不单独占一个键
         if (tool.isReadOnly()) {
-            parts.add("<font color='#1F7A3D'>只读</font>");
+            parts.add("<font color='#1F7A3D'>" + I18n.t("tool.badge.readOnly") + "</font>");
         }
         if (tool.isDestructive()) {
-            parts.add("<font color='#C0392B'>破坏性</font>");
+            parts.add("<font color='#C0392B'>" + I18n.t("tool.badge.destructive") + "</font>");
         }
         if (tool.isIdempotent()) {
-            parts.add("幂等");
+            parts.add(I18n.t("tool.badge.idempotent"));
         }
         if (tool.isOpenWorld()) {
-            parts.add("开放世界");
+            parts.add(I18n.t("tool.badge.openWorld"));
         }
         String subtitle = tool.getSubtitle();
         if (subtitle != null && !subtitle.isBlank()) {
@@ -410,44 +524,131 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         try {
             arguments = JsonUtil.parseObjectLenient(jsonEditor.getText());
         } catch (IllegalArgumentException e) {
-            statusLabel.setForeground(Ui.ERROR);
-            statusLabel.setText("JSON 参数有误：" + e.getMessage());
+            setStatus(StatusKind.BAD_JSON, e.getMessage());
             return;
         }
 
-        statusLabel.setForeground(JBColor.GRAY);
-        statusLabel.setText("以 " + arguments.size() + " 个参数调用");
+        setStatus(StatusKind.CALLING, String.valueOf(arguments.size()));
         setBusy(true);
-        resultView.showLoading("工具 " + tool.getName());
+        resultView.showLoading(null);
+        applyResultSubject();
         callback.invokeTool(tool, arguments);
     }
 
     /** 调用结束：渲染结果。 */
     public void showResult(McpCallResult result) {
         setBusy(false);
-        String what = tool == null ? "工具" : "工具 " + tool.getName();
-        resultView.show(result, what);
+        resultView.show(result, null);
+        applyResultSubject();
         if (result == null) {
             return;
         }
         if (result.getError() != null) {
-            statusLabel.setForeground(Ui.ERROR);
-            statusLabel.setText("调用失败");
+            setStatus(StatusKind.FAILED, null);
         } else if (!result.isSuccess()) {
-            statusLabel.setForeground(Ui.WARN);
-            statusLabel.setText("服务端返回 isError = true");
+            setStatus(StatusKind.TOOL_ERROR, null);
         } else {
-            statusLabel.setForeground(Ui.OK);
-            statusLabel.setText("完成 · " + result.getElapsedMillis() + " ms");
+            setStatus(StatusKind.DONE, String.valueOf(result.getElapsedMillis()));
         }
     }
 
     /** 本地异常（未连接、超时、进程挂了）。 */
     public void showInvokeError(String message) {
         setBusy(false);
-        statusLabel.setForeground(Ui.ERROR);
-        statusLabel.setText("调用失败");
-        resultView.showFailure(message, tool == null ? "工具" : "工具 " + tool.getName());
+        // 状态栏只说"失败"，细节（哪一步、什么原因）归结果区
+        setStatus(StatusKind.FAILED, null);
+        resultView.showFailure(message, null);
+        applyResultSubject();
+    }
+
+    /**
+     * 把结果区状态句里的"被调对象"交给文案键解析（工具名当占位符实参）。
+     *
+     * <p>不能直接传渲染好的文本——语言一切换，句子换了新语言、这个词还卡在旧语言
+     * （会出现"Calling 工具「echo」 …"这种半中半英）。
+     */
+    private void applyResultSubject() {
+        if (tool == null) {
+            resultView.setSubjectKey("tool.what.plain");
+        } else {
+            resultView.setSubjectKey("tool.what.named", tool.getName());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 状态栏
+    // ------------------------------------------------------------------
+
+    private void setStatus(StatusKind kind, @Nullable String arg) {
+        this.statusKind = kind;
+        this.statusArg = arg;
+        renderStatus();
+    }
+
+    /** 按当前语言把状态栏那句话重新拼出来。 */
+    private void renderStatus() {
+        statusLabel.setForeground(switch (statusKind) {
+            case BAD_JSON, FAILED -> Ui.ERROR;
+            case TOOL_ERROR -> Ui.WARN;
+            case DONE -> Ui.OK;
+            default -> JBColor.GRAY;
+        });
+        statusLabel.setText(switch (statusKind) {
+            case HISTORY -> I18n.t("tool.status.historyLoaded", statusArg);
+            case BAD_JSON -> I18n.t("tool.status.badJson", statusArg);
+            case CALLING -> I18n.t("tool.status.calling", statusArg);
+            case FAILED -> I18n.t("tool.status.failed");
+            case TOOL_ERROR -> I18n.t("tool.status.toolError");
+            case DONE -> I18n.t("tool.status.done", statusArg);
+            case NONE -> "";
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 语言
+    // ------------------------------------------------------------------
+
+    /**
+     * 重新贴一遍这份面板自己的文案（语言切换时由主面板级联调用）。
+     *
+     * <p><b>只换字，不重建。</b>页签顺序、编辑区内容与光标、分隔条比例、目录树的展开
+     * 状态都得原样留着——切语言的代价本来就只该是"字变了"。任何"因为要换文案所以
+     * 重建一遍"的做法都会把这些一起弄丢。
+     */
+    public void applyTexts() {
+        // 子面板各自贴自己的那部分：结果区的状态条、请求头正文、历史列表
+        resultView.applyTexts();
+        headersPanel.applyTexts();
+        historyPanel.applyTexts();
+
+        invokeButton.setText(I18n.t(busy ? "tool.action.invoking" : "tool.action.invoke"));
+        invokeButton.setToolTipText(I18n.t("tool.action.invoke.tip"));
+        resetButton.setToolTipText(I18n.t("tool.action.reset.tip"));
+        formatButton.setToolTipText(I18n.t("tool.action.format.tip"));
+
+        setTabTitle(jsonTab, "tool.tab.json");
+        setTabTitle(definitionTab, "tool.tab.definition");
+        setTabTitle(historyPanel, "tool.tab.history");
+        refreshHeadersTitle();
+        refreshHistoryTitle();
+
+        if (tool == null) {
+            titleLabel.setText(I18n.t("tool.title.none"));
+            setDescription(idleHintText());
+        } else {
+            // 标题留着工具名（那是服务端给的名字，不翻），描述可能被换过
+            badgesLabel.setText(badges(tool));
+            setDescription(toolDescription(tool));
+        }
+        renderStatus();
+    }
+
+    /** 按组件换页签标题——用 indexOfComponent 而不是记死下标，页签可以缺（请求头）。 */
+    private void setTabTitle(JComponent component, String key) {
+        int index = tabs.indexOfComponent(component);
+        if (index >= 0) {
+            tabs.setTitleAt(index, I18n.t(key));
+        }
     }
 
     @Override

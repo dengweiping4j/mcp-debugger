@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpCallResult;
 import com.tool4j.mcp.model.McpPrompt;
 import com.tool4j.mcp.model.McpResource;
@@ -119,26 +120,26 @@ public class McpClient implements AutoCloseable {
         if (closed) {
             // 走到这里说明上层复用了已经 close() 过的实例。直说，别让它退化成
             // 底层那句没头没尾的"连接已关闭"。
-            throw new McpException("会话已关闭，无法重新连接：请重新创建一个连接"
-                    + "（已关闭的客户端实例不可复用）");
+            throw new McpException(I18n.t("client.err.closedReused"));
         }
         try {
-            print("正在启动传输通道：" + transport.describe());
+            print(I18n.t("client.log.startingTransport", transport.describe()));
             transport.start();
 
-            print("正在发送 initialize 握手…");
+            print(I18n.t("client.log.sendingHandshake"));
             JsonObject initResult = request("initialize", buildInitializeParams());
             this.serverInfo = new McpServerInfo(initResult);
-            print("握手完成：" + serverInfo.getSummary()
+            print(I18n.t("client.log.handshakeDone", serverInfo.getSummary())
                     + (serverInfo.getCapabilities().entrySet().isEmpty()
-                    ? "" : "，能力：" + String.join(",", serverInfo.getCapabilities().keySet())));
+                    ? "" : I18n.t("client.log.capabilities",
+                    String.join(",", serverInfo.getCapabilities().keySet()))));
 
             // 规范要求：initialize 成功后必须补一条 initialized 通知，之后才允许发别的请求
             transport.send(JsonRpc.notification("notifications/initialized", new JsonObject()));
             connected = true;
 
             if (serverInfo.getInstructions() != null && !serverInfo.getInstructions().isBlank()) {
-                print("服务端使用说明：\n" + serverInfo.getInstructions().strip());
+                print(I18n.t("client.log.instructions", serverInfo.getInstructions().strip()));
             }
             loadCatalog();
         } catch (McpException | RuntimeException e) {
@@ -147,7 +148,7 @@ public class McpClient implements AutoCloseable {
             if (e instanceof McpException me) {
                 throw me;
             }
-            throw new McpException("连接失败：" + McpException.describe(e), e);
+            throw new McpException(I18n.t("client.err.connectFailed", McpException.describe(e)), e);
         }
     }
 
@@ -177,20 +178,20 @@ public class McpClient implements AutoCloseable {
         try {
             refreshTools();
         } catch (McpException e) {
-            print("拉取工具列表失败：" + e.getDisplayMessage());
+            print(I18n.t("client.log.toolsListFailed", e.getDisplayMessage()));
         }
         try {
             refreshResources();
         } catch (McpException e) {
             if (!e.isMethodNotFound()) {
-                print("拉取资源列表失败：" + e.getDisplayMessage());
+                print(I18n.t("client.log.resourcesListFailed", e.getDisplayMessage()));
             }
         }
         try {
             refreshPrompts();
         } catch (McpException e) {
             if (!e.isMethodNotFound()) {
-                print("拉取提示词列表失败：" + e.getDisplayMessage());
+                print(I18n.t("client.log.promptsListFailed", e.getDisplayMessage()));
             }
         }
     }
@@ -221,7 +222,7 @@ public class McpClient implements AutoCloseable {
 
     /** 拉取全部工具（含游标翻页），并缓存。 */
     public List<McpTool> refreshTools() throws McpException {
-        stage("正在拉取工具列表…");
+        stage(I18n.t("client.stage.fetchingTools"));
         List<McpTool> collected = new ArrayList<>();
         String cursor = null;
         for (int page = 0; page < 200; page++) {
@@ -242,16 +243,16 @@ public class McpClient implements AutoCloseable {
         }
         collected.sort(Comparator.comparing(McpTool::getName, String.CASE_INSENSITIVE_ORDER));
         tools = List.copyOf(collected);
-        print("已获取 " + tools.size() + " 个工具" + pageSuffix(cursor));
+        print(I18n.t("client.log.toolsFetched", tools.size(), pageSuffix(cursor)));
         return tools;
     }
 
     private static String pageSuffix(String cursor) {
-        return cursor == null || cursor.isBlank() ? "" : "（仍有后续分页）";
+        return cursor == null || cursor.isBlank() ? "" : I18n.t("client.log.morePages");
     }
 
     public List<McpResource> refreshResources() throws McpException {
-        stage("正在拉取资源列表…");
+        stage(I18n.t("client.stage.fetchingResources"));
         List<McpResource> list = new ArrayList<>();
         String cursor = null;
         for (int page = 0; page < 200; page++) {
@@ -284,16 +285,16 @@ public class McpClient implements AutoCloseable {
             }
         } catch (McpException e) {
             if (!e.isMethodNotFound()) {
-                print("拉取资源模板失败：" + e.getDisplayMessage());
+                print(I18n.t("client.log.templatesFailed", e.getDisplayMessage()));
             }
         }
         resourceTemplates = List.copyOf(templates);
-        print("已获取 " + resources.size() + " 个资源、" + resourceTemplates.size() + " 个资源模板");
+        print(I18n.t("client.log.resourcesFetched", resources.size(), resourceTemplates.size()));
         return resources;
     }
 
     public List<McpPrompt> refreshPrompts() throws McpException {
-        stage("正在拉取提示词列表…");
+        stage(I18n.t("client.stage.fetchingPrompts"));
         List<McpPrompt> list = new ArrayList<>();
         String cursor = null;
         for (int page = 0; page < 200; page++) {
@@ -314,7 +315,7 @@ public class McpClient implements AutoCloseable {
         }
         list.sort(Comparator.comparing(McpPrompt::getName, String.CASE_INSENSITIVE_ORDER));
         prompts = List.copyOf(list);
-        print("已获取 " + prompts.size() + " 个提示词");
+        print(I18n.t("client.log.promptsFetched", prompts.size()));
         return prompts;
     }
 
@@ -346,14 +347,14 @@ public class McpClient implements AutoCloseable {
         JsonObject params = new JsonObject();
         params.addProperty("name", name);
         params.add("arguments", arguments == null ? new JsonObject() : arguments);
-        return invoke("tools/call", params, "工具 " + name);
+        return invoke("tools/call", params, I18n.t("client.what.tool", name));
     }
 
     /** 读取一个资源。 */
     public McpCallResult readResource(String uri) {
         JsonObject params = new JsonObject();
         params.addProperty("uri", uri);
-        return invoke("resources/read", params, "资源 " + uri);
+        return invoke("resources/read", params, I18n.t("client.what.resource", uri));
     }
 
     /** 取一个提示词（返回的 messages 在 {@link McpCallResult#getRaw()} 里）。 */
@@ -363,21 +364,21 @@ public class McpClient implements AutoCloseable {
         if (arguments != null && arguments.size() > 0) {
             params.add("arguments", arguments);
         }
-        return invoke("prompts/get", params, "提示词 " + name);
+        return invoke("prompts/get", params, I18n.t("client.what.prompt", name));
     }
 
     private McpCallResult invoke(String method, JsonObject params, String what) {
         long started = System.nanoTime();
         McpCallResult result;
         try {
-            stage("正在调用 " + what + " …");
+            stage(I18n.t("client.stage.calling", what));
             result = new McpCallResult(request(method, params));
         } catch (McpException e) {
             result = new McpCallResult(null);
             result.setError(e.getDisplayMessage());
         } catch (RuntimeException e) {
             result = new McpCallResult(null);
-            result.setError("调用失败：" + McpException.describe(e));
+            result.setError(I18n.t("client.err.callFailed", McpException.describe(e)));
         }
         result.setElapsedMillis((System.nanoTime() - started) / 1_000_000L);
         return result;
@@ -390,12 +391,12 @@ public class McpClient implements AutoCloseable {
     /** 发一条请求并返回 {@code result}；服务端返回 error 时抛 {@link McpException}。 */
     private JsonObject request(String method, JsonObject params) throws McpException {
         if (userClosedOrDead() && !"initialize".equals(method)) {
-            throw new McpException("连接已断开，请重新连接");
+            throw new McpException(I18n.t("client.err.disconnected"));
         }
         long id = idSequence.getAndIncrement();
         JsonObject response = transport.request(JsonRpc.request(id, method, params), timeoutMillis());
         if (response == null) {
-            throw new McpException("服务端对 " + method + " 没有返回任何响应");
+            throw new McpException(I18n.t("client.err.noResponse", method));
         }
         if (JsonRpc.hasError(response)) {
             throw McpException.fromRpcResponse(method, response.getAsJsonObject("error"));
@@ -459,18 +460,18 @@ public class McpClient implements AutoCloseable {
                 JsonObject result = new JsonObject();
                 result.add("roots", roots);
                 response = JsonRpc.success(id, result);
-                print("应答服务端 roots/list → " + roots.size() + " 个根目录");
+                print(I18n.t("client.log.rootsAnswered", roots.size()));
             }
             default -> {
                 response = JsonRpc.error(id, JsonRpc.METHOD_NOT_FOUND,
-                        "MCP Debugger 未实现该方法：" + method);
-                print("服务端请求了未实现的方法：" + method + "（已按协议返回 -32601）");
+                        I18n.t("client.err.notImplemented", method));
+                print(I18n.t("client.log.unimplementedRequest", method));
             }
         }
         try {
             transport.send(response);
         } catch (McpException e) {
-            print("应答服务端请求 " + method + " 失败：" + e.getDisplayMessage());
+            print(I18n.t("client.log.answerFailed", method, e.getDisplayMessage()));
         }
     }
 
@@ -494,15 +495,15 @@ public class McpClient implements AutoCloseable {
                     String level = JsonUtil.str(params.getAsJsonObject(), "level", "info");
                     JsonElement data = params.getAsJsonObject().get("data");
                     String text = data == null ? "" : (data.isJsonPrimitive() ? data.getAsString() : JsonUtil.compact(data));
-                    print("服务端日志[" + level + "] " + JsonUtil.firstLine(text));
+                    print(I18n.t("client.log.serverLog", level, JsonUtil.firstLine(text)));
                 }
             }
-            case "notifications/tools/list_changed" -> print("服务端通知：工具列表已变化");
-            case "notifications/resources/list_changed" -> print("服务端通知：资源列表已变化");
-            case "notifications/prompts/list_changed" -> print("服务端通知：提示词列表已变化");
-            case "notifications/resources/updated" -> print("服务端通知：资源已更新 "
-                    + JsonUtil.firstLine(JsonUtil.compact(params)));
-            default -> print("服务端通知：" + method);
+            case "notifications/tools/list_changed" -> print(I18n.t("client.notify.toolsChanged"));
+            case "notifications/resources/list_changed" -> print(I18n.t("client.notify.resourcesChanged"));
+            case "notifications/prompts/list_changed" -> print(I18n.t("client.notify.promptsChanged"));
+            case "notifications/resources/updated" -> print(I18n.t("client.notify.resourceUpdated",
+                    JsonUtil.firstLine(JsonUtil.compact(params))));
+            default -> print(I18n.t("client.notify.generic", method));
         }
     }
 
@@ -542,7 +543,7 @@ public class McpClient implements AutoCloseable {
                     try {
                         handleServerRequest(message);
                     } catch (RuntimeException e) {
-                        print("应答服务端请求时出错：" + JsonUtil.rootMessage(e));
+                        print(I18n.t("client.log.answerError", JsonUtil.rootMessage(e)));
                     }
                 });
             }
@@ -551,7 +552,7 @@ public class McpClient implements AutoCloseable {
         @Override
         public void onClosed(String reason) {
             connected = false;
-            listeners.forEach(l -> l.onLog("连接已断开：" + reason));
+            listeners.forEach(l -> l.onLog(I18n.t("client.log.disconnected", reason)));
             listeners.forEach(l -> l.onDisconnected(reason));
         }
     }

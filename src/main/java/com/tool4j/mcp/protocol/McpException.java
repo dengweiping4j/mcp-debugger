@@ -2,6 +2,8 @@ package com.tool4j.mcp.protocol;
 
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
+
 /**
  * MCP 调用过程中所有可预期的失败。
  *
@@ -18,6 +20,15 @@ public class McpException extends Exception {
 
     private final int code;
     private final boolean methodNotFound;
+    /**
+     * 错误码是否已经渲染进消息正文里了。
+     *
+     * <p>用 {@link #fromRpcResponse} 造出来的异常，消息里已经带了给人看的码名，
+     * 而 {@link JsonRpc#describeError} 又渲染了 {@code [code]} 数字，所以
+     * {@link #getDisplayMessage()} 不该再拼一次。其余构造路径（都是 {@link #LOCAL}）
+     * 需要它兜底，将来有人直接用带码的构造器也得能看到码。
+     */
+    private final boolean codeInlined;
 
     public McpException(String message) {
         this(LOCAL, message, null);
@@ -32,9 +43,14 @@ public class McpException extends Exception {
     }
 
     public McpException(int code, String message, Throwable cause) {
+        this(code, message, cause, false);
+    }
+
+    private McpException(int code, String message, Throwable cause, boolean codeInlined) {
         super(message, cause);
         this.code = code;
         this.methodNotFound = code == JsonRpc.METHOD_NOT_FOUND;
+        this.codeInlined = codeInlined;
     }
 
     public int getCode() {
@@ -48,17 +64,20 @@ public class McpException extends Exception {
 
     public static McpException fromRpcResponse(String method, JsonObject error) {
         int code = JsonUtil.intOr(error, "code", JsonRpc.INTERNAL_ERROR);
-        String prefix = "调用 " + method + " 失败（" + JsonRpc.describeErrorCode(code) + "）：";
+        // 错误码在这里只出现两次，且各司其职：一次是给人看的名字（describeErrorCode），
+        // 一次是 JsonRpc.describeError 里渲染的 [code] 数字。原先 getDisplayMessage()
+        // 还会再拼一次「（JSON-RPC -32601）」，同一个码在一句话里说三遍，已删。
         // 用 JsonRpc.describeError 拼消息，error.data 里服务端放的校验细节才不会丢
-        return new McpException(code, prefix + JsonRpc.describeError(error), null);
+        return new McpException(code, I18n.t("err.rpc.callFailed",
+                method, JsonRpc.describeErrorCode(code), JsonRpc.describeError(error)), null, true);
     }
 
     /** 界面/日志里显示用的完整描述。 */
     public String getDisplayMessage() {
-        if (code == LOCAL) {
+        if (code == LOCAL || codeInlined) {
             return getMessage();
         }
-        return getMessage() + "（JSON-RPC " + code + "）";
+        return I18n.t("err.rpc.codeSuffix", getMessage(), code);
     }
 
     /**

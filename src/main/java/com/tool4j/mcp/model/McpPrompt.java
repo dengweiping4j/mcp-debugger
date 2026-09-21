@@ -3,6 +3,7 @@ package com.tool4j.mcp.model;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.JsonUtil;
 import lombok.Getter;
 
@@ -21,7 +22,7 @@ public class McpPrompt {
 
     public McpPrompt(JsonObject raw) {
         this.raw = raw == null ? new JsonObject() : raw;
-        this.name = JsonUtil.str(this.raw, "name", "(未命名提示词)");
+        this.name = JsonUtil.str(this.raw, "name", null);
         this.title = JsonUtil.str(this.raw, "title", null);
         this.description = JsonUtil.str(this.raw, "description", null);
         this.arguments = new ArrayList<>();
@@ -36,17 +37,24 @@ public class McpPrompt {
         }
     }
 
+    /** 兜底值在取用时才本地化，理由同 {@link McpTool#getName()}。 */
+    public String getName() {
+        return name == null || name.isBlank() ? I18n.t("model.prompt.unnamed") : name;
+    }
+
     public String getSubtitle() {
         if (!arguments.isEmpty()) {
             long required = arguments.stream().filter(Argument::isRequired).count();
-            return arguments.size() + " 个参数" + (required > 0 ? "（必填 " + required + "）" : "");
+            return required > 0
+                    ? I18n.t("model.prompt.argCountRequired", arguments.size(), required)
+                    : I18n.t("model.prompt.argCount", arguments.size());
         }
         return JsonUtil.firstLine(description);
     }
 
     @Override
     public String toString() {
-        return name;
+        return getName();
     }
 
     /** 提示词参数：MCP 只给了名字/描述/是否必填，没有类型信息，所以界面上一律按字符串输入。 */

@@ -16,6 +16,7 @@ import com.intellij.ui.components.JBTextArea;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.JBUI;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.SchemaUtil;
 
@@ -95,7 +96,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
 
     private final Project project;
     private final JPanel host = new JPanel(new BorderLayout());
-    private final JBLabel emptyHint = Ui.hint("该工具不需要参数，直接点「调用」即可。");
+    private final JBLabel emptyHint = Ui.hint(I18n.t("sf.empty.noParams"));
     private final List<Field> allFields = new ArrayList<>();
 
     private JsonObject rootSchema = SchemaUtil.emptyObjectSchema();
@@ -122,6 +123,16 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
 
         emptyHint.setBorder(JBUI.Borders.empty(8, 4));
         rebuild(null);
+        applyTexts();
+    }
+
+    /** 重画所有常驻文字（空提示 + 每个字段的标题/提示/错误/编辑器 tooltip），不碰输入值。 */
+    public void applyTexts() {
+        emptyHint.setText(I18n.t("sf.empty.noParams"));
+        for (Field field : allFields) {
+            field.applyTexts();
+        }
+        relayoutHints();
     }
 
     // ------------------------------------------------------------------
@@ -204,7 +215,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
 
             int leftInset = nested ? 16 : 4;
 
-            JComponent label = buildLabel(schema, name, required);
+            JComponent label = buildLabel(field, schema, name, required);
             field.labelWidth = label.getPreferredSize().width;
 
             GridBagConstraints labelConstraints = new GridBagConstraints();
@@ -243,7 +254,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
      * 字段标题：Schema 给了 {@code title} 就优先用它（服务端往往写得更像人话），
      * 同时把真正的字段名用小灰字带上——不然用户对着「JSON」页签会对不上哪个参数是哪个。
      */
-    private JComponent buildLabel(JsonObject schema, String name, boolean required) {
+    private JComponent buildLabel(Field field, JsonObject schema, String name, boolean required) {
         JPanel panel = new JPanel();
         panel.setOpaque(false);
         panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
@@ -251,21 +262,38 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
         String title = SchemaUtil.titleOf(schema, name);
         JBLabel label = new JBLabel(title);
         label.setFont(label.getFont().deriveFont(Font.BOLD));
-        label.setToolTipText("字段名：" + name);
+        label.setToolTipText(I18n.t("sf.tooltip.fieldName") + name);
+        field.fieldLabel = label;
         panel.add(label);
 
         if (!title.equals(name)) {
             JBLabel key = Ui.hint(" " + name);
-            key.setToolTipText("实际发送给服务端的字段名");
+            key.setToolTipText(I18n.t("sf.tooltip.actualFieldName"));
+            field.keyLabel = key;
             panel.add(key);
         }
         if (required) {
             JBLabel star = new JBLabel(" *");
             star.setForeground(JBColor.RED);
-            star.setToolTipText("必填");
+            star.setToolTipText(I18n.t("sf.tooltip.required"));
+            field.starLabel = star;
             panel.add(star);
         }
         return panel;
+    }
+
+    /**
+     * 换掉下拉框第 0 项的文案（即"未设置"这个占位项），并保住用户当前的选中项。
+     *
+     * <p>{@link ComboBox}（继承自 {@code JComboBox}）没有 {@code setItemAt}，
+     * 只能删了再插；删第 0 项会把选中项挤掉，所以先记下索引再还原。
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void replaceFirstItem(ComboBox combo, String text) {
+        int selected = combo.getSelectedIndex();
+        combo.removeItemAt(0);
+        combo.insertItemAt(text, 0);
+        combo.setSelectedIndex(selected);
     }
 
     // ------------------------------------------------------------------
@@ -401,6 +429,10 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
         private int textWidth = JBUI.scale(HINT_MIN_WIDTH);
         /** 标签列宽度，算提示换行宽度时要减掉。 */
         int labelWidth;
+        /** 标题 / 字段名 / 必填星号，由 {@link #buildLabel} 回填；没建出来时为 null。 */
+        JBLabel fieldLabel;
+        JBLabel keyLabel;
+        JBLabel starLabel;
 
         Field(String name, JsonObject schema, boolean required, String path, JComponent editor) {
             this.name = name;
@@ -467,7 +499,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             StringBuilder sb = new StringBuilder("<html><b>");
             sb.append(Ui.escapeHtml(name)).append("</b>");
             if (required) {
-                sb.append(" <font color='#C0392B'>必填</font>");
+                sb.append(" <font color='#C0392B'>").append(I18n.t("sf.tooltip.required")).append("</font>");
             }
             String constraint = SchemaUtil.describeConstraint(schema);
             if (!constraint.isEmpty()) {
@@ -480,6 +512,26 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             return sb.append("</html>").toString();
         }
 
+        /** 重画本字段的常驻文字（标题/字段名/必填星号 tooltip、编辑器 tooltip、提示与错误），不碰输入值。 */
+        void applyTexts() {
+            if (fieldLabel != null) {
+                fieldLabel.setToolTipText(I18n.t("sf.tooltip.fieldName") + name);
+            }
+            if (keyLabel != null) {
+                keyLabel.setToolTipText(I18n.t("sf.tooltip.actualFieldName"));
+            }
+            if (starLabel != null) {
+                starLabel.setToolTipText(I18n.t("sf.tooltip.required"));
+            }
+            editor.setToolTipText(tooltip());
+            if (hintLabel != null) {
+                hintLabel.setText(wrapHtml(textWidth, hintText));
+            }
+            if (!errorMessage.isEmpty()) {
+                setError(errorMessage);
+            }
+        }
+
         /** 空 Optional 表示"不提交这个字段"。 */
         abstract Optional<JsonElement> value();
 
@@ -488,14 +540,14 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             try {
                 box = value();
             } catch (IllegalArgumentException e) {
-                problems.add(path + "：" + e.getMessage());
+                problems.add(path + I18n.t("sf.error.colon") + e.getMessage());
                 setError(e.getMessage());
                 return;
             }
             if (box == null || box.isEmpty()) {
                 if (required) {
-                    problems.add("缺少必填参数 " + path);
-                    setError("必填，请填写");
+                    problems.add(I18n.t("sf.error.missingRequired", path));
+                    setError(I18n.t("sf.error.required"));
                 }
                 return;
             }
@@ -679,12 +731,13 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
                 }
                 double parsed = Double.parseDouble(trimmed);
                 if (Double.isNaN(parsed) || Double.isInfinite(parsed)) {
-                    throw new NumberFormatException("非法数值");
+                    throw new NumberFormatException(I18n.t("sf.error.invalidNumber"));
                 }
                 return Optional.of(new JsonPrimitive(parsed));
             } catch (NumberFormatException e) {
-                throw new IllegalArgumentException("「" + trimmed + "」不是合法的"
-                        + ("integer".equals(type) ? "整数" : "数字"));
+                throw new IllegalArgumentException("integer".equals(type)
+                        ? I18n.t("sf.error.notInteger", trimmed)
+                        : I18n.t("sf.error.notNumber", trimmed));
             }
         }
     }
@@ -693,6 +746,19 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
 
         BoolField(String name, JsonObject schema, boolean required, String path, JsonElement initial) {
             super(name, schema, required, path, createBoolEditor(schema, required, initial));
+        }
+
+        @Override
+        void applyTexts() {
+            super.applyTexts();
+            if (editor instanceof JCheckBox box) {
+                box.setText(I18n.t("sf.bool.enabled"));
+                box.setToolTipText(I18n.t("sf.bool.requiredTooltip"));
+            } else {
+                ComboBox<?> combo = (ComboBox<?>) editor;
+                replaceFirstItem(combo, I18n.t("sf.bool.unset"));
+                combo.setToolTipText(I18n.t("sf.bool.optionalTooltip"));
+            }
         }
 
         @Override
@@ -713,14 +779,14 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
                 ? initial.getAsBoolean()
                 : JsonUtil.bool(schema, "default", false);
         if (required) {
-            JCheckBox box = new JCheckBox("启用");
+            JCheckBox box = new JCheckBox(I18n.t("sf.bool.enabled"));
             box.setSelected(initialBool);
-            box.setToolTipText("必填布尔值：勾选为 true，不勾选为 false");
+            box.setToolTipText(I18n.t("sf.bool.requiredTooltip"));
             return box;
         }
-        ComboBox<String> combo = new ComboBox<>(new String[]{"未设置", "true", "false"});
+        ComboBox<String> combo = new ComboBox<>(new String[]{I18n.t("sf.bool.unset"), "true", "false"});
         combo.setSelectedIndex(initial == null ? 0 : (initialBool ? 1 : 2));
-        combo.setToolTipText("选填布尔值：保持「未设置」就不会把该字段发给服务端");
+        combo.setToolTipText(I18n.t("sf.bool.optionalTooltip"));
         return Ui.compactInput(combo, 160);
     }
 
@@ -732,6 +798,16 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             super(name, schema, required, path, createEnumCombo(schema, values, required, initial));
             this.values = values;
             this.optional = !required;
+        }
+
+        @Override
+        void applyTexts() {
+            super.applyTexts();
+            ComboBox<?> combo = (ComboBox<?>) editor;
+            if (optional) {
+                replaceFirstItem(combo, I18n.t("sf.bool.unset"));
+            }
+            combo.setToolTipText(required ? I18n.t("sf.enum.requiredTooltip") : I18n.t("sf.enum.optionalTooltip"));
         }
 
         @Override
@@ -753,7 +829,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
                                                     JsonElement initial) {
         List<Object> items = new ArrayList<>();
         if (!required) {
-            items.add("未设置");
+            items.add(I18n.t("sf.bool.unset"));
         }
         int selected = required ? 0 : 1;
         for (int i = 0; i < values.size(); i++) {
@@ -767,7 +843,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
         }
         ComboBox<Object> combo = new ComboBox<>(items.toArray());
         combo.setSelectedIndex(Math.max(0, Math.min(selected, items.size() - 1)));
-        combo.setToolTipText(required ? "必填枚举" : "选填枚举：保持「未设置」就不会把该字段发给服务端");
+        combo.setToolTipText(required ? I18n.t("sf.enum.requiredTooltip") : I18n.t("sf.enum.optionalTooltip"));
         return Ui.compactInput(combo, 200);
     }
 
@@ -818,11 +894,11 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
                     default -> new JsonPrimitive(raw);
                 };
             } catch (NumberFormatException e) {
-                throw new IllegalArgumentException("第 " + position + " 个元素「" + Ui.ellipsize(raw, 20)
-                        + "」不是合法的" + ("integer".equals(itemType) ? "整数" : "数字"));
+                throw new IllegalArgumentException("integer".equals(itemType)
+                        ? I18n.t("sf.error.listNotInteger", position, Ui.ellipsize(raw, 20))
+                        : I18n.t("sf.error.listNotNumber", position, Ui.ellipsize(raw, 20)));
             } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("第 " + position + " 个元素「" + Ui.ellipsize(raw, 20)
-                        + "」不是布尔值（只能用 true / false）");
+                throw new IllegalArgumentException(I18n.t("sf.error.listNotBool", position, Ui.ellipsize(raw, 20)));
             }
         }
 
@@ -833,7 +909,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             if ("false".equalsIgnoreCase(raw)) {
                 return false;
             }
-            throw new IllegalArgumentException("不是布尔值");
+            throw new IllegalArgumentException(I18n.t("sf.error.notBool"));
         }
 
         private static String listText(JsonElement initial) {
@@ -866,7 +942,7 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             }
             JsonElement parsed = JsonUtil.tryParse(text);
             if (parsed == null) {
-                throw new IllegalArgumentException("不是合法的 JSON（要么清空，要么补完）");
+                throw new IllegalArgumentException(I18n.t("sf.error.badJson"));
             }
             return Optional.of(parsed);
         }
@@ -904,8 +980,8 @@ public final class SchemaFormPanel extends JPanel implements Disposable {
             Optional<JsonElement> box = value();
             if (box.isEmpty()) {
                 if (required) {
-                    problems.add("缺少必填参数 " + path);
-                    setError("必填对象，请至少填写一个子字段");
+                    problems.add(I18n.t("sf.error.missingRequired", path));
+                    setError(I18n.t("sf.error.requiredObject"));
                 }
                 return;
             }

@@ -12,6 +12,7 @@ import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.ui.JBUI;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.protocol.JsonUtil;
@@ -55,6 +56,13 @@ public final class RequestHeadersPanel extends JPanel {
     private Runnable onChanged = () -> {
     };
 
+    private enum HdrState { UNSET, ACTIVE, ERROR }
+
+    /** 当前提示状态，applyTexts 据此重画。 */
+    private HdrState hdrState = HdrState.UNSET;
+    /** 解析失败时的原始错误信息（ERROR 状态要显示）。 */
+    private String lastErrorTooltip;
+
     public RequestHeadersPanel(Project project, Disposable parent) {
         super(new BorderLayout());
         setOpaque(false);
@@ -76,6 +84,7 @@ public final class RequestHeadersPanel extends JPanel {
         add(editor, BorderLayout.CENTER);
         add(footer, BorderLayout.SOUTH);
         showConfig(null);
+        applyTexts();
     }
 
     /** 内容变化后的回调（只在真的写进配置时触发），用来刷新页签标题。 */
@@ -140,8 +149,9 @@ public final class RequestHeadersPanel extends JPanel {
      * 这是切换服务器、导入配置之后最常确认的一件事。
      */
     public String tabTitle() {
+        String title = I18n.t("hdr.title");
         int n = count();
-        return n == 0 ? "请求头" : "请求头 (" + n + ")";
+        return n == 0 ? title : title + " (" + n + ")";
     }
 
     // ------------------------------------------------------------------
@@ -157,7 +167,9 @@ public final class RequestHeadersPanel extends JPanel {
             parsed = JsonUtil.parseObjectLenient(editor.getText());
         } catch (IllegalArgumentException e) {
             // 敲到一半必然解析不了，这里只提示，不动配置里的旧值
-            setState(Ui.ERROR, "JSON 无效，未生效", e.getMessage());
+            hdrState = HdrState.ERROR;
+            lastErrorTooltip = e.getMessage();
+            setState(Ui.ERROR, I18n.t("hdr.state.invalidJson"), e.getMessage());
             return;
         }
         List<KeyValue> headers = new ArrayList<>(parsed.size());
@@ -193,19 +205,43 @@ public final class RequestHeadersPanel extends JPanel {
      */
     private void refreshState() {
         if (count() == 0) {
-            setState(Ui.MUTED, "未设置 · 例如 {\"Authorization\": \"Bearer xxx\"}",
-                    "只对 http / sse 生效。这里写下去的值立刻用于后续请求，不用重连"
-                            + "（SSE 的长连接要重连才会换）。键名会显示在页签上。");
+            hdrState = HdrState.UNSET;
+            setState(Ui.MUTED, I18n.t("hdr.state.unset"), I18n.t("hdr.state.unsetTip"));
             return;
         }
-        setState(Ui.OK, "已生效 · " + count() + " 项，改动立刻用于后续请求",
-                "内容以明文保存在 IDE 配置目录的 mcp-debugger.xml 里，注意别把带真 token 的截图贴出去。");
+        hdrState = HdrState.ACTIVE;
+        setState(Ui.OK, I18n.t("hdr.state.active", count()), I18n.t("hdr.state.activeTip"));
     }
 
     private void setState(JBColor color, String text, @Nullable String tooltip) {
         state.setForeground(color);
         state.setText(text == null || text.isEmpty() ? " " : text);
         state.setToolTipText(tooltip);
+    }
+
+    /** 按当前语言重画编辑器下方的状态小字；不碰编辑器内容，可随时安全调用。 */
+    public void applyTexts() {
+        renderState();
+    }
+
+    private void renderState() {
+        if (bound == null) {
+            state.setForeground(Ui.MUTED);
+            state.setText(" ");
+            state.setToolTipText(null);
+            return;
+        }
+        switch (hdrState) {
+            case UNSET:
+                setState(Ui.MUTED, I18n.t("hdr.state.unset"), I18n.t("hdr.state.unsetTip"));
+                break;
+            case ACTIVE:
+                setState(Ui.OK, I18n.t("hdr.state.active", count()), I18n.t("hdr.state.activeTip"));
+                break;
+            case ERROR:
+                setState(Ui.ERROR, I18n.t("hdr.state.invalidJson"), lastErrorTooltip);
+                break;
+        }
     }
 
     private static String jsonOf(List<KeyValue> headers) {

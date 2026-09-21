@@ -15,6 +15,7 @@ import com.intellij.ui.components.JBTextArea;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.JBUI;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.McpException;
 import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
@@ -68,14 +69,15 @@ public final class ServerEditDialog extends DialogWrapper {
     private final JBTextField workingDirField = new JBTextField();
     private final JBTextField urlField = new JBTextField();
 
-    private final KeyValueTable envTable = new KeyValueTable("变量名", "值", true);
+    private final KeyValueTable envTable =
+            new KeyValueTable(I18n.t("srv.env.keyHeader"), I18n.t("srv.env.valueHeader"), true);
 
     private final JBTextField protocolVersionField = new JBTextField();
     private final JBTextField timeoutField = new JBTextField();
-    private final JCheckBox enabledCheck = new JCheckBox("启用（可被连接）");
-    private final JCheckBox autoConnectCheck = new JCheckBox("在下拉框里选中它时自动连接");
+    private final JCheckBox enabledCheck = new JCheckBox(I18n.t("srv.check.enabled"));
+    private final JCheckBox autoConnectCheck = new JCheckBox(I18n.t("srv.check.autoConnect"));
 
-    private final JButton testButton = new JButton("测试连接");
+    private final JButton testButton = new JButton(I18n.t("srv.test.button"));
     private final JBLabel testResult = new JBLabel(" ");
     private boolean testing;
 
@@ -85,8 +87,11 @@ public final class ServerEditDialog extends DialogWrapper {
         this.original = existing;
         this.settings = McpSettings.getInstance();
 
-        setTitle(existing == null ? "新建 MCP 服务器" : "编辑 MCP 服务器");
-        setOKButtonText("保存");
+        setTitle(I18n.t(existing == null ? "srv.title.new" : "srv.title.edit"));
+        setOKButtonText(I18n.t("srv.ok"));
+        // 取消按钮也要显式给文案：不给的话平台会用"IDE 的语言"渲染它，
+        // 于是插件切成英文时会出现「OK / 取消」这种半中半英的按钮条。
+        setCancelButtonText(I18n.t("ui.cancel"));
         loadValues();
         init();
         updateTransportCard();
@@ -142,9 +147,9 @@ public final class ServerEditDialog extends DialogWrapper {
     @Override
     protected @Nullable JComponent createCenterPanel() {
         JBTabbedPane tabs = new JBTabbedPane();
-        tabs.addTab("连接", Ui.wrap(buildConnectionTab(), 8, 8, 8, 8));
-        tabs.addTab("环境变量", Ui.wrap(buildExtraTab(), 8, 8, 8, 8));
-        tabs.addTab("高级", Ui.wrap(buildAdvancedTab(), 8, 8, 8, 8));
+        tabs.addTab(I18n.t("srv.tab.connection"), Ui.wrap(buildConnectionTab(), 8, 8, 8, 8));
+        tabs.addTab(I18n.t("srv.tab.env"), Ui.wrap(buildExtraTab(), 8, 8, 8, 8));
+        tabs.addTab(I18n.t("srv.tab.advanced"), Ui.wrap(buildAdvancedTab(), 8, 8, 8, 8));
         tabs.setPreferredSize(new Dimension(JBUI.scale(560), JBUI.scale(380)));
         return tabs;
     }
@@ -158,10 +163,10 @@ public final class ServerEditDialog extends DialogWrapper {
         transportHost.add(buildHttpCard(), "http");
 
         int row = 0;
-        row = addRow(panel, row, "名称", nameField,
-                "下拉框里显示的名字，例如 filesystem。同一个名字不要重复。");
-        row = addRow(panel, row, "传输方式", transportCombo,
-                "stdio：本地拉起一个子进程；http：Streamable HTTP（MCP 2025-03-26 起）；sse：旧版 HTTP+SSE。");
+        row = addRow(panel, row, I18n.t("srv.field.name"), nameField,
+                I18n.t("srv.field.name.hint"));
+        row = addRow(panel, row, I18n.t("srv.field.transport"), transportCombo,
+                I18n.t("srv.field.transport.hint"));
         GridBagConstraints constraints = new GridBagConstraints();
         constraints.gridx = 1;
         constraints.gridy = row;
@@ -178,20 +183,20 @@ public final class ServerEditDialog extends DialogWrapper {
         JPanel panel = new JPanel(new GridBagLayout());
         panel.setOpaque(false);
         int row = 0;
-        row = addRow(panel, row, "命令", commandField,
-                "可执行文件名或绝对路径，例如 npx、uvx、java。"
-                        + "Windows 上 npx / uvx 这类 .cmd 命令会自动用 cmd /c 启动，不用自己包。");
+        row = addRow(panel, row, I18n.t("srv.field.command"), commandField,
+                I18n.t("srv.field.command.hint"));
 
         argsArea.setRows(4);
         argsArea.setFont(Ui.monospace());
         JBScrollPane argsScroll = new JBScrollPane(argsArea);
         argsScroll.setPreferredSize(new Dimension(JBUI.scale(320), JBUI.scale(84)));
-        row = addRow(panel, row, "参数", argsScroll, "每行一个参数。例如第一行 -y，第二行 @modelcontextprotocol/server-filesystem，第三行 /tmp。");
+        row = addRow(panel, row, I18n.t("srv.field.args"), argsScroll,
+                I18n.t("srv.field.args.hint"));
 
         JPanel dirRow = new JPanel(new BorderLayout(JBUI.scale(6), 0));
         dirRow.setOpaque(false);
         dirRow.add(workingDirField, BorderLayout.CENTER);
-        JButton browse = new JButton("浏览…");
+        JButton browse = new JButton(I18n.t("srv.browse"));
         browse.addActionListener(e -> {
             VirtualFile file = FileChooser.chooseFile(
                     FileChooserDescriptorFactory.createSingleFolderDescriptor(), project, null);
@@ -200,7 +205,8 @@ public final class ServerEditDialog extends DialogWrapper {
             }
         });
         dirRow.add(browse, BorderLayout.EAST);
-        row = addRow(panel, row, "工作目录", dirRow, "子进程的工作目录；留空表示当前工程根目录。");
+        row = addRow(panel, row, I18n.t("srv.field.workdir"), dirRow,
+                I18n.t("srv.field.workdir.hint"));
 
         GridBagConstraints filler = new GridBagConstraints();
         filler.gridx = 1;
@@ -217,8 +223,8 @@ public final class ServerEditDialog extends DialogWrapper {
         JPanel panel = new JPanel(new GridBagLayout());
         panel.setOpaque(false);
         int row = 0;
-        row = addRow(panel, row, "地址", urlField,
-                "Streamable HTTP 填完整端点（常见是 …/mcp）；旧版 SSE 填 SSE 地址（常见是 …/sse）。");
+        row = addRow(panel, row, I18n.t("srv.field.url"), urlField,
+                I18n.t("srv.field.url.hint"));
 
         GridBagConstraints filler = new GridBagConstraints();
         filler.gridx = 1;
@@ -241,9 +247,8 @@ public final class ServerEditDialog extends DialogWrapper {
     private JComponent buildExtraTab() {
         JPanel panel = new JPanel(new BorderLayout(0, JBUI.scale(8)));
         panel.setOpaque(false);
-        panel.add(section("环境变量（仅 stdio 生效）", envTable,
-                "追加或覆盖子进程的环境变量；没列出的变量继承 IDE 进程。"
-                        + "值里出现 ${...} 不会被展开，请直接写真实值。"), BorderLayout.CENTER);
+        panel.add(section(I18n.t("srv.env.section"), envTable, I18n.t("srv.env.hint")),
+                BorderLayout.CENTER);
         return panel;
     }
 
@@ -254,22 +259,21 @@ public final class ServerEditDialog extends DialogWrapper {
         JPanel form = new JPanel(new GridBagLayout());
         form.setOpaque(false);
         int row = 0;
-        row = addRow(form, row, "协议版本", protocolVersionField,
-                "initialize 时声明的版本。默认 " + McpServerConfig.DEFAULT_PROTOCOL_VERSION
-                        + "；很旧的服务端可以试 2024-11-05。服务端返回哪个版本我们都接受。");
-        row = addRow(form, row, "超时（秒）", timeoutField,
-                "单次请求（含工具调用）的等待上限。跑得慢的工具可以调到 300。");
+        row = addRow(form, row, I18n.t("srv.field.protocol"), protocolVersionField,
+                I18n.t("srv.field.protocol.hint", McpServerConfig.DEFAULT_PROTOCOL_VERSION));
+        row = addRow(form, row, I18n.t("srv.field.timeout"), timeoutField,
+                I18n.t("srv.field.timeout.hint"));
         JPanel flags = new JPanel();
         flags.setOpaque(false);
         flags.setLayout(new BoxLayout(flags, BoxLayout.Y_AXIS));
         flags.add(enabledCheck);
         flags.add(autoConnectCheck);
-        addRow(form, row, "开关", flags, null);
+        addRow(form, row, I18n.t("srv.field.flags"), flags, null);
 
         JPanel testRow = new JPanel(new BorderLayout(JBUI.scale(8), 0));
         testRow.setOpaque(false);
         testRow.setBorder(JBUI.Borders.emptyTop(8));
-        testButton.setToolTipText("按当前表单内容真的连一次，把服务端信息与工具数量打回来");
+        testButton.setToolTipText(I18n.t("srv.test.tooltip"));
         testButton.addActionListener(e -> testConnection());
         testResult.setFont(Ui.smaller(testResult.getFont()));
         testRow.add(testButton, BorderLayout.WEST);
@@ -281,10 +285,7 @@ public final class ServerEditDialog extends DialogWrapper {
     }
 
     private JComponent securityNote() {
-        JBLabel note = Ui.htmlHint(
-                "提示：环境变量与请求头里的 token 都以明文保存在 IDE 配置目录的 mcp-debugger.xml 里"
-                        + "（请求头在工具窗口的「请求头」栏里改，这个对话框不再重复提供入口）。"
-                        + "请不要把这份配置文件提交到版本库，也不要贴进公开 Issue。");
+        JBLabel note = Ui.htmlHint(I18n.t("srv.security.note"));
         note.setFont(Ui.smaller(note.getFont()));
         return Ui.wrap(note, 2, 2, 2, 2);
     }
@@ -363,28 +364,28 @@ public final class ServerEditDialog extends DialogWrapper {
     protected @Nullable ValidationInfo doValidate() {
         String name = nameField.getText() == null ? "" : nameField.getText().trim();
         if (name.isEmpty()) {
-            return new ValidationInfo("请填写服务器名称", nameField);
+            return new ValidationInfo(I18n.t("srv.err.nameRequired"), nameField);
         }
         if (settings.isNameTaken(name, original == null ? null : original.getId())) {
-            return new ValidationInfo("已经有一个叫「" + name + "」的服务器了，换个名字", nameField);
+            return new ValidationInfo(I18n.t("srv.err.nameTaken", name), nameField);
         }
         TransportType transport = selectedTransport();
         if (!transport.isHttp()) {
             String command = commandField.getText() == null ? "" : commandField.getText().trim();
             if (command.isEmpty()) {
-                return new ValidationInfo("stdio 需要填写启动命令，例如 npx 或 uvx", commandField);
+                return new ValidationInfo(I18n.t("srv.err.commandRequired"), commandField);
             }
         } else {
             String url = urlField.getText() == null ? "" : urlField.getText().trim();
             if (url.isEmpty()) {
-                return new ValidationInfo("请填写服务端地址", urlField);
+                return new ValidationInfo(I18n.t("srv.err.urlRequired"), urlField);
             }
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                return new ValidationInfo("地址要以 http:// 或 https:// 开头", urlField);
+                return new ValidationInfo(I18n.t("srv.err.urlScheme"), urlField);
             }
         }
         if (parseTimeout() <= 0) {
-            return new ValidationInfo("超时时间要是大于 0 的整数（秒）", timeoutField);
+            return new ValidationInfo(I18n.t("srv.err.timeout"), timeoutField);
         }
         return null;
     }
@@ -462,27 +463,27 @@ public final class ServerEditDialog extends DialogWrapper {
         }
         ValidationInfo info = doValidate();
         if (info != null) {
-            setTestResult(Ui.ERROR, "✘ 请先修正表单：" + info.message);
+            setTestResult(Ui.ERROR, "✘ " + I18n.t("srv.test.validating", info.message));
             return;
         }
         McpServerConfig probe = buildConfig();
         testing = true;
         testButton.setEnabled(false);
-        setTestResult(JBColor.GRAY, "正在连接…");
+        setTestResult(JBColor.GRAY, I18n.t("srv.test.connecting"));
 
-        Bg.run(project, "测试 MCP 连接", true, () -> {
+        Bg.run(project, I18n.t("srv.test.task"), true, () -> {
             McpClient client = new McpClient(probe);
             client.setClientVersion(PluginInfo.version());
             try {
                 client.connect();
-                StringBuilder sb = new StringBuilder("✔ 连接成功：");
-                sb.append(client.getServerInfo().getSummary());
-                sb.append("，工具 ").append(client.getTools().size());
+                StringBuilder sb = new StringBuilder(
+                        I18n.t("srv.test.ok", client.getServerInfo().getSummary()));
+                sb.append(I18n.t("srv.test.tools", client.getTools().size()));
                 if (!client.getResources().isEmpty()) {
-                    sb.append("，资源 ").append(client.getResources().size());
+                    sb.append(I18n.t("srv.test.resources", client.getResources().size()));
                 }
                 if (!client.getPrompts().isEmpty()) {
-                    sb.append("，提示词 ").append(client.getPrompts().size());
+                    sb.append(I18n.t("srv.test.prompts", client.getPrompts().size()));
                 }
                 return sb.toString();
             } finally {
@@ -492,7 +493,7 @@ public final class ServerEditDialog extends DialogWrapper {
         }, message -> {
             testing = false;
             testButton.setEnabled(true);
-            setTestResult(Ui.OK, message);
+            setTestResult(Ui.OK, "✔ " + message);
         }, error -> {
             testing = false;
             testButton.setEnabled(true);

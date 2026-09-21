@@ -3,6 +3,7 @@ package com.tool4j.mcp.transport;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.protocol.JsonRpc;
 import com.tool4j.mcp.protocol.JsonUtil;
@@ -58,16 +59,16 @@ public class SseTransport extends AbstractTransport {
     public void start() throws McpException {
         String raw = config.getUrl();
         if (raw == null || raw.isBlank()) {
-            throw new McpException("未配置 SSE 地址");
+            throw new McpException(I18n.t("err.sse.noUrl"));
         }
         this.sseUrl = raw.trim();
         try {
             URI uri = URI.create(sseUrl);
             if (uri.getScheme() == null) {
-                throw new McpException("SSE 地址缺少协议前缀，应形如 http://127.0.0.1:3000/sse：" + sseUrl);
+                throw new McpException(I18n.t("err.sse.noScheme", sseUrl));
             }
         } catch (IllegalArgumentException e) {
-            throw new McpException("SSE 地址不是合法 URL：" + sseUrl);
+            throw new McpException(I18n.t("err.sse.badUrl", sseUrl));
         }
 
         this.http = HttpClient.newBuilder()
@@ -87,41 +88,39 @@ public class SseTransport extends AbstractTransport {
             // 这条 GET 是长连接，不能设超时：HttpRequest.timeout 会跟着流一起生效
             response = http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
         } catch (IOException e) {
-            throw new McpException("连接 SSE 端点失败：" + describeIoFailure(e) + "\n地址：" + sseUrl, e);
+            throw new McpException(I18n.t("err.sse.connectFailed", describeIoFailure(e), sseUrl), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new McpException("连接 SSE 端点被中断");
+            throw new McpException(I18n.t("err.sse.connectInterrupted"));
         }
 
         int status = response.statusCode();
         if (status >= 400) {
             String body = new String(safeReadAll(response.body()), StandardCharsets.UTF_8);
-            throw new McpException("SSE 端点返回 HTTP " + status
-                    + (body.isBlank() ? "" : "：" + JsonUtil.firstLine(body))
-                    + "\n（旧版 SSE 地址通常以 /sse 结尾，Streamable HTTP 端点则用 http 类型连接）");
+            String detail = body.isBlank() ? "" : I18n.t("err.sse.badStatusDetail", JsonUtil.firstLine(body));
+            throw new McpException(I18n.t("err.sse.badStatus", status, detail));
         }
 
         this.stream = response.body();
-        reportNotice("SSE 长连接已建立：" + sseUrl);
+        reportNotice(I18n.t("err.sse.connected", sseUrl));
         daemonThread("mcp-sse-reader-" + shortId(), this::readLoop).start();
 
         try {
             if (!endpointReady.await(ENDPOINT_WAIT.toSeconds(), TimeUnit.SECONDS)) {
                 close();
-                throw new McpException("SSE 连接已建立，但 " + ENDPOINT_WAIT.toSeconds()
-                        + " 秒内没有收到 endpoint 事件，无法确定消息投递地址");
+                throw new McpException(I18n.t("err.sse.endpointTimeout", ENDPOINT_WAIT.toSeconds()));
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             close();
-            throw new McpException("等待 SSE endpoint 事件被中断");
+            throw new McpException(I18n.t("err.sse.endpointInterrupted"));
         }
 
         if (endpointFailed) {
             close();
-            throw new McpException("服务端没有给出可用的消息端点：" + endpointFailure);
+            throw new McpException(I18n.t("err.sse.noEndpoint", endpointFailure));
         }
-        reportNotice("消息端点：" + messageEndpoint);
+        reportNotice(I18n.t("err.sse.endpoint", messageEndpoint));
     }
 
     // ------------------------------------------------------------------
@@ -162,13 +161,13 @@ public class SseTransport extends AbstractTransport {
             }
         } catch (IOException e) {
             if (!userClosed) {
-                reportNotice("SSE 连接读取异常：" + JsonUtil.rootMessage(e));
+                reportNotice(I18n.t("err.sse.readError", JsonUtil.rootMessage(e)));
             }
         }
         // 到这里说明长连接断了：endpoint 还没等到也要放行，让 start() 报错而不是干等
         endpointReady.countDown();
         if (!userClosed) {
-            String reason = "SSE 连接已断开";
+            String reason = I18n.t("err.sse.disconnected");
             failPending(reason);
             reportClosedOnce(reason);
         }
@@ -182,7 +181,7 @@ public class SseTransport extends AbstractTransport {
             String resolved = resolveEndpoint(data.trim());
             if (resolved.isBlank()) {
                 endpointFailed = true;
-                endpointFailure = "endpoint 事件内容为空";
+                endpointFailure = I18n.t("err.sse.endpointEmpty");
             } else {
                 messageEndpoint = resolved;
             }
@@ -190,13 +189,13 @@ public class SseTransport extends AbstractTransport {
             return;
         }
         if (event != null && !"message".equals(event)) {
-            reportNotice("收到未知 SSE 事件：" + event + " → " + JsonUtil.firstLine(data));
+            reportNotice(I18n.t("err.sse.unknownEvent", event, JsonUtil.firstLine(data)));
             return;
         }
         // event 为空或 message：按 JSON-RPC 报文处理
         JsonElement parsed = JsonUtil.tryParse(data);
         if (parsed == null || !parsed.isJsonObject()) {
-            reportNotice("SSE 中出现无法解析的数据，已忽略：" + JsonUtil.firstLine(data));
+            reportNotice(I18n.t("err.sse.unparsable", JsonUtil.firstLine(data)));
             return;
         }
         handleIncoming(parsed.getAsJsonObject());
@@ -218,7 +217,7 @@ public class SseTransport extends AbstractTransport {
         ensureEndpoint();
         Long id = JsonRpc.idAsLong(request);
         if (id == null) {
-            throw new McpException("内部错误：SSE 请求缺少数字 id");
+            throw new McpException(I18n.t("err.common.missingId", "SSE"));
         }
         String method = JsonRpc.methodOf(request);
         CompletableFuture<JsonObject> box = register(id);
@@ -250,13 +249,13 @@ public class SseTransport extends AbstractTransport {
             safeReadAll(response.body());
             int status = response.statusCode();
             if (status >= 400) {
-                throw new McpException("向 SSE 消息端点投递 " + JsonRpc.methodOf(message) + " 失败：HTTP " + status);
+                throw new McpException(I18n.t("err.sse.postFailed", JsonRpc.methodOf(message), status));
             }
         } catch (IOException e) {
-            throw new McpException("向 SSE 消息端点投递失败：" + describeIoFailure(e), e);
+            throw new McpException(I18n.t("err.sse.postIoFailed", describeIoFailure(e)), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new McpException("向 SSE 消息端点投递被中断");
+            throw new McpException(I18n.t("err.sse.postInterrupted"));
         }
     }
 
@@ -265,17 +264,17 @@ public class SseTransport extends AbstractTransport {
             try {
                 builder.header(e.getKey(), e.getValue());
             } catch (IllegalArgumentException ex) {
-                reportNotice("请求头 " + e.getKey() + " 被 JDK 限制，已忽略");
+                reportNotice(I18n.t("err.common.headerRejected", e.getKey()));
             }
         }
     }
 
     private void ensureEndpoint() throws McpException {
         if (userClosed) {
-            throw new McpException("连接已关闭");
+            throw new McpException(I18n.t("err.common.closed"));
         }
         if (messageEndpoint == null || messageEndpoint.isBlank()) {
-            throw new McpException("尚未拿到 SSE 消息端点，连接可能已经断开");
+            throw new McpException(I18n.t("err.sse.noEndpointYet"));
         }
     }
 
@@ -303,7 +302,7 @@ public class SseTransport extends AbstractTransport {
     @Override
     public void close() {
         userClosed = true;
-        failPending("连接已关闭");
+        failPending(I18n.t("err.common.closed"));
         closeQuietly(stream);
         endpointReady.countDown();
         stream = null;

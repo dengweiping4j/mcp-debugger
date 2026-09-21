@@ -3,6 +3,7 @@ package com.tool4j.mcp.ui;
 import com.google.gson.JsonObject;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBCheckBox;
@@ -11,6 +12,7 @@ import com.intellij.ui.components.JBScrollPane;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.JsonRpc;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.settings.McpSettings;
@@ -55,9 +57,14 @@ public final class LogConsole extends JPanel {
     private static final SimpleDateFormat TIME = new SimpleDateFormat("HH:mm:ss.SSS");
 
     private final JTextPane area = new JTextPane();
-    private final JBLabel title = new JBLabel("报文日志");
-    private final JBLabel summary = Ui.hint("暂无日志");
-    private final JBCheckBox payloadToggle = new JBCheckBox("报文体", true);
+    private final JBLabel title = new JBLabel(I18n.t("log.title"));
+    private final JBLabel summary = Ui.hint(I18n.t("log.empty"));
+    private final JBCheckBox payloadToggle = new JBCheckBox(I18n.t("log.payloadToggle"), true);
+
+    /** 清空按钮。 */
+    private JButton clearButton;
+    /** 折叠日志图标动作，供 applyTexts 重贴文案。 */
+    private AnAction collapseAction;
 
     /** 点折叠箭头时回调（主面板负责隐藏本面板并把分隔条归位）。 */
     private Runnable collapseHandler;
@@ -87,6 +94,7 @@ public final class LogConsole extends JPanel {
 
         payloadToggle.setSelected(McpSettings.getInstance().isLogPayloads());
         payloadToggle.addActionListener(e -> McpSettings.getInstance().setLogPayloads(payloadToggle.isSelected()));
+        applyTexts();
     }
 
     /** 点折叠箭头之后做什么，由主面板决定。 */
@@ -101,24 +109,22 @@ public final class LogConsole extends JPanel {
         left.setOpaque(false);
         // 折叠入口就挨着标题：边栏窄的时候工具栏那一排也可能被压掉，这是"就近"的那个入口
         // （重新展开走工具栏的「报文日志」开关）。
-        left.add(Ui.iconToolbar("McpDebuggerLogHeader", area,
-                Ui.iconAction("折叠日志", "折叠底部的日志区（工具栏的「报文日志」可以再打开）",
-                        AllIcons.General.CollapseComponent, this::requestCollapse)));
+        collapseAction = Ui.iconAction(I18n.t("log.collapseText"), I18n.t("log.collapseDesc"),
+                AllIcons.General.CollapseComponent, this::requestCollapse);
+        left.add(Ui.iconToolbar("McpDebuggerLogHeader", area, collapseAction));
         left.add(title);
 
-        payloadToggle.setToolTipText("在日志里显示完整报文体；关掉后只留方法名，看长响应更清爽");
         payloadToggle.setFont(Ui.smaller(payloadToggle.getFont()));
 
-        JButton clear = new JButton("清空");
-        clear.setToolTipText("清空日志（不会断开连接）");
-        clear.setFont(Ui.smaller(clear.getFont()));
-        clear.setMargin(JBUI.insets(2, 6, 2, 6));
-        clear.addActionListener(e -> clear());
+        clearButton = new JButton(I18n.t("log.clear"));
+        clearButton.setFont(Ui.smaller(clearButton.getFont()));
+        clearButton.setMargin(JBUI.insets(2, 6, 2, 6));
+        clearButton.addActionListener(e -> clear());
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(4), 0));
         right.setOpaque(false);
         right.add(payloadToggle);
-        right.add(clear);
+        right.add(clearButton);
 
         JPanel header = new JPanel(new BorderLayout(JBUI.scale(4), 0));
         header.setOpaque(false);
@@ -133,6 +139,20 @@ public final class LogConsole extends JPanel {
         if (collapseHandler != null) {
             collapseHandler.run();
         }
+    }
+
+    /** 重贴所有用户可见文案；语言切换时由外层统一级联调用，幂等且不碰数据。 */
+    public void applyTexts() {
+        title.setText(I18n.t("log.title"));
+        payloadToggle.setText(I18n.t("log.payloadToggle"));
+        payloadToggle.setToolTipText(I18n.t("log.payloadTooltip"));
+        clearButton.setText(I18n.t("log.clear"));
+        clearButton.setToolTipText(I18n.t("log.clearTooltip"));
+        if (collapseAction != null) {
+            collapseAction.getTemplatePresentation().setText(I18n.t("log.collapseText"));
+            collapseAction.getTemplatePresentation().setDescription(I18n.t("log.collapseDesc"));
+        }
+        updateSummary();
     }
 
     // ------------------------------------------------------------------
@@ -161,10 +181,10 @@ public final class LogConsole extends JPanel {
         } else if (JsonRpc.hasError(message)) {
             JsonObject error = message.getAsJsonObject("error");
             int code = JsonUtil.intOr(error, "code", 0);
-            action = "错误 " + code + " " + JsonUtil.firstLine(JsonUtil.str(error, "message", ""));
+            action = I18n.t("log.errorLine", code, JsonUtil.firstLine(JsonUtil.str(error, "message", "")));
             color = Ui.ERROR;
         } else {
-            action = "响应";
+            action = I18n.t("log.response");
             color = Ui.TRAFFIC_IN;
         }
 
@@ -239,12 +259,12 @@ public final class LogConsole extends JPanel {
     private void updateSummary() {
         int total = requestCount + responseCount;
         String text = total == 0
-                ? "暂无日志"
-                : "请求 " + requestCount + " · 响应 " + responseCount
-                + (errorCount > 0 ? " · 错误 " + errorCount : "");
+                ? I18n.t("log.empty")
+                : I18n.t("log.summary", requestCount, responseCount)
+                + (errorCount > 0 ? " " + I18n.t("log.summaryError", errorCount) : "");
         // 计数放在中间那一格，窄边栏里它最先被挤没；顺手挂到标题的 tooltip 上，
         // 免得"报文统计"在窄窗口里彻底看不到
-        title.setToolTipText("报文日志 · " + text);
+        title.setToolTipText(I18n.t("log.title") + " · " + text);
         if (ApplicationManager.getApplication().isDispatchThread()) {
             summary.setText(text);
         } else {
@@ -258,6 +278,6 @@ public final class LogConsole extends JPanel {
         }
         return text.length() <= PAYLOAD_LIMIT
                 ? text
-                : text.substring(0, PAYLOAD_LIMIT) + " …（已截断，完整共 " + text.length() + " 字符）";
+                : text.substring(0, PAYLOAD_LIMIT) + " " + I18n.t("log.truncated", text.length());
     }
 }

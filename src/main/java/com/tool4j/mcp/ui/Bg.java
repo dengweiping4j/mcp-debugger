@@ -5,6 +5,8 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 
+import com.tool4j.mcp.i18n.I18n;
+
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -62,7 +64,7 @@ public final class Bg {
 
             @Override
             public void onCancel() {
-                onFailure.accept(new CancellationException("操作已取消"));
+                onFailure.accept(new CancellationException(I18n.t("ui.bg.cancelled")));
             }
         }.queue();
     }

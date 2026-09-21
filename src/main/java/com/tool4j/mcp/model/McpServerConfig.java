@@ -1,5 +1,7 @@
 package com.tool4j.mcp.model;
 
+import com.tool4j.mcp.i18n.I18n;
+
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -129,15 +131,17 @@ public class McpServerConfig {
         return map;
     }
 
+    /** 下拉框里显示的名字。没起名时退化成 command / url，所以取词在调用时做，不存字段。 */
     public String getDisplayName() {
         if (name != null && !name.isBlank()) {
             return name;
         }
+        String unnamed = I18n.t("model.server.unnamed");
         if (transport == TransportType.STDIO) {
             String c = command == null ? "" : command.trim();
-            return c.isEmpty() ? "(未命名)" : c;
+            return c.isEmpty() ? unnamed : c;
         }
-        return (url == null || url.isBlank()) ? "(未命名)" : url;
+        return (url == null || url.isBlank()) ? unnamed : url;
     }
 
     public McpServerConfig copy() {

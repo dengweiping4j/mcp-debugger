@@ -40,6 +40,13 @@ public final class McpSettings implements PersistentStateComponent<McpSettings.S
         public boolean logVisible = true;
         /** 日志里是否显示完整报文体（关掉后只显示方法名，方便看长响应的上下文）。 */
         public boolean logPayloads = true;
+        /**
+         * 界面语言偏好：{@code auto}（跟随 IDE）/ {@code zh} / {@code en}。
+         *
+         * <p>存字符串而不是枚举：老配置里没有这个字段，读出来是 {@code null}，正好当成 {@code auto}；
+         * 将来加语言也不用改已有配置。合法性由 {@link #setUiLanguage} 兜底。
+         */
+        public String uiLanguage = LanguageSupport.AUTO;
     }
 
     private State state = new State();
@@ -190,5 +197,27 @@ public final class McpSettings implements PersistentStateComponent<McpSettings.S
 
     public void setLogPayloads(boolean payloads) {
         getState().logPayloads = payloads;
+    }
+
+    // ------------------------------------------------------------------
+    // 界面语言
+
+    /**
+     * 界面语言偏好：{@code auto} / {@code zh} / {@code en}。
+     *
+     * <p>老配置里没有这个字段，{@code null} 和空串一律当成 {@code auto}（跟随 IDE），
+     * 所以升级上来的用户行为不变。
+     */
+    public @NotNull String getUiLanguage() {
+        String value = getState().uiLanguage;
+        return (value == null || value.isBlank()) ? LanguageSupport.AUTO : value.trim();
+    }
+
+    /** 只接受已知的三种取值，其余一律回落到 {@code auto}，免得配置文件被手改坏之后界面语言没了。 */
+    public void setUiLanguage(@Nullable String preference) {
+        getState().uiLanguage = switch (preference == null ? "" : preference.trim()) {
+            case LanguageSupport.ZH, LanguageSupport.EN -> preference.trim();
+            default -> LanguageSupport.AUTO;
+        };
     }
 }

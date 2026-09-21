@@ -8,6 +8,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 
+import com.tool4j.mcp.i18n.I18n;
+
 /**
  * Gson 的集中包装。
  *
@@ -75,14 +77,14 @@ public final class JsonUtil {
         try {
             e = LENIENT.fromJson(t, JsonElement.class);
         } catch (RuntimeException ex) {
-            throw new IllegalArgumentException("JSON 解析失败：" + rootMessage(ex));
+            throw new IllegalArgumentException(I18n.t("rpc.json.parseFailed", rootMessage(ex)));
         }
         if (e == null || e.isJsonNull()) {
             return new JsonObject();
         }
         if (!e.isJsonObject()) {
-            throw new IllegalArgumentException("需要一个 JSON 对象（以 { 开头），当前是 "
-                    + (e.isJsonArray() ? "数组" : "标量"));
+            throw new IllegalArgumentException(I18n.t("rpc.json.objectExpected",
+                    I18n.t(e.isJsonArray() ? "rpc.json.array" : "rpc.json.scalar")));
         }
         return e.getAsJsonObject();
     }

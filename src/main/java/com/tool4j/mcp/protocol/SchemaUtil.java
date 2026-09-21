@@ -5,6 +5,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
+import com.tool4j.mcp.i18n.I18n;
+
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -412,39 +414,35 @@ public final class SchemaUtil {
         String format = JsonUtil.str(schema, "format", null);
 
         switch (type) {
-            case "integer" -> bits.add("整数");
-            case "number" -> bits.add("数字");
-            case "string" -> {
-                if (format != null) {
-                    bits.add("字符串 · " + format);
-                } else {
-                    bits.add("字符串");
-                }
-            }
-            case "boolean" -> bits.add("布尔值");
-            case "null" -> bits.add("必须为 null");
-            case "array" -> bits.add("数组");
-            case "object" -> bits.add("对象");
+            case "integer" -> bits.add(I18n.t("schema.type.integer"));
+            case "number" -> bits.add(I18n.t("schema.type.number"));
+            case "string" -> bits.add(format != null
+                    ? I18n.t("schema.type.stringWithFormat", format)
+                    : I18n.t("schema.type.string"));
+            case "boolean" -> bits.add(I18n.t("schema.type.boolean"));
+            case "null" -> bits.add(I18n.t("schema.type.null"));
+            case "array" -> bits.add(I18n.t("schema.type.array"));
+            case "object" -> bits.add(I18n.t("schema.type.object"));
             // 服务端什么都没声明：界面上是单行输入，说"未声明类型"比"任意类型"更实在
-            default -> bits.add("未声明类型");
+            default -> bits.add(I18n.t("schema.type.undeclared"));
         }
 
         if ("array".equals(type)) {
             JsonObject items = items(schema);
             if (items != null) {
-                bits.add("元素：" + typeOf(items));
+                bits.add(I18n.t("schema.items", typeOf(items)));
             }
             Integer min = intOrNull(schema, "minItems");
             Integer max = intOrNull(schema, "maxItems");
             if (min != null || max != null) {
-                bits.add("数量 " + (min == null ? "" : "≥" + min) + (max == null ? "" : " ≤" + max));
+                bits.add(I18n.t("schema.count", range(min, max)));
             }
         }
         if ("string".equals(type)) {
             Integer min = intOrNull(schema, "minLength");
             Integer max = intOrNull(schema, "maxLength");
             if (min != null || max != null) {
-                bits.add("长度 " + (min == null ? "" : "≥" + min) + (max == null ? "" : " ≤" + max));
+                bits.add(I18n.t("schema.length", range(min, max)));
             }
         }
         if ("integer".equals(type) || "number".equals(type)) {
@@ -459,7 +457,7 @@ public final class SchemaUtil {
         }
         JsonArray en = enumValues(schema);
         if (en != null) {
-            bits.add("枚举 " + en.size() + " 项");
+            bits.add(I18n.t("schema.enum", en.size()));
         }
         JsonElement def = defaultValue(schema);
         if (def != null && !def.isJsonNull()) {
@@ -467,12 +465,18 @@ public final class SchemaUtil {
             if (d.length() > 40) {
                 d = d.substring(0, 37) + "…";
             }
-            bits.add("默认 " + d);
+            bits.add(I18n.t("schema.default", d));
         }
         if (isNullable(schema)) {
-            bits.add("可空");
+            bits.add(I18n.t("schema.nullable"));
         }
-        return String.join("，", bits);
+        // 中文用全角逗号、英文用逗号加空格，所以分隔符本身也得进词表
+        return String.join(I18n.t("schema.separator"), bits);
+    }
+
+    /** {@code ≥1 ≤10} 这种范围片段。符号本身不翻译，只由调用方决定前面挂什么标签。 */
+    private static String range(Integer min, Integer max) {
+        return (min == null ? "" : "≥" + min) + (max == null ? "" : " ≤" + max);
     }
 
     private static Integer intOrNull(JsonObject schema, String key) {

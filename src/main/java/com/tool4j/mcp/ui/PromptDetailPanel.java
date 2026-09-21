@@ -16,6 +16,7 @@ import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpCallResult;
 import com.tool4j.mcp.model.McpPrompt;
 import com.tool4j.mcp.protocol.JsonUtil;
@@ -55,7 +56,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
     private final JBTextArea descriptionArea = new JBTextArea();
     private final JBLabel statusLabel = Ui.hint("");
     private final JPanel argsHost = new JPanel(new GridBagLayout());
-    private final JButton fetchButton = new JButton("获取");
+    private final JButton fetchButton = new JButton(I18n.t("prompt.fetch.label"));
     private final JBTabbedPane tabs = new JBTabbedPane();
     private final JPanel messagesHost = new JPanel();
     private final com.intellij.ui.EditorTextField rawViewer;
@@ -65,6 +66,23 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
     private McpPrompt prompt;
     private Callback callback;
     private boolean busy;
+
+    private enum PromptStatus { IDLE, MISSING_REQUIRED, FETCHING, FAILED, DONE }
+
+    /** 状态行种类，applyTexts 据此重画。 */
+    private PromptStatus promptStatus = PromptStatus.IDLE;
+    /** 缺失的必填参数名（MISSING_REQUIRED 状态要显示，需按语言分隔符重新拼接）。 */
+    private java.util.List<String> missingRequired;
+    /** 最近一次成功结果（用于重画消息区，不含网络调用）。 */
+    private McpCallResult lastResult;
+    /** true 表示最近一次是 showError（显示错误正文），而非 showResult。 */
+    private boolean showErrorMode;
+    /** showError 传入的错误正文。 */
+    private String lastErrorBody;
+    /** 必填星号标签，applyTexts 只更新它们的 tooltip。 */
+    private final java.util.List<JBLabel> requiredStars = new java.util.ArrayList<>();
+    /** 「该提示词没有参数」提示，applyTexts 只更新它的文字。 */
+    private JBLabel noArgsHint;
 
     public PromptDetailPanel(Project project, Disposable parent) {
         super(new BorderLayout());
@@ -85,8 +103,8 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         rawPanel.setBorder(JBUI.Borders.empty(6));
         rawPanel.add(rawViewer, BorderLayout.CENTER);
 
-        tabs.addTab("消息", messagesScroll);
-        tabs.addTab("原始 JSON", rawPanel);
+        tabs.addTab(I18n.t("prompt.tab.messages"), messagesScroll);
+        tabs.addTab(I18n.t("prompt.tab.raw"), rawPanel);
 
         JBSplitter splitter = new JBSplitter(true, 0.45f);
         splitter.setFirstComponent(buildHeader());
@@ -97,6 +115,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         add(splitter, BorderLayout.CENTER);
 
         clear();
+        applyTexts();
     }
 
     private JComponent buildHeader() {
@@ -123,7 +142,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         descriptionScroll.getViewport().setOpaque(false);
         descriptionScroll.setPreferredSize(new Dimension(0, JBUI.scale(44)));
 
-        fetchButton.setToolTipText("获取该提示词（Ctrl+Enter）");
+        fetchButton.setToolTipText(I18n.t("prompt.fetch.tooltip"));
         fetchButton.addActionListener(e -> fetch());
 
         JPanel buttonRow = new JPanel(new BorderLayout());
@@ -148,10 +167,15 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
 
     public void clear() {
         prompt = null;
-        titleLabel.setText("选择一个提示词");
+        promptStatus = PromptStatus.IDLE;
+        showErrorMode = false;
+        lastResult = null;
+        lastErrorBody = null;
+        requiredStars.clear();
+        noArgsHint = null;
+        titleLabel.setText(I18n.t("prompt.title.empty"));
         metaLabel.setText("");
-        descriptionArea.setText("提示词是服务端预置的模板，取回来就是一组可直接塞进对话的消息。"
-                + "点左侧列表里的提示词，填好参数后点「获取」。");
+        descriptionArea.setText(I18n.t("prompt.help.text"));
         descriptionArea.setCaretPosition(0);
         argFields.clear();
         argsHost.removeAll();
@@ -165,20 +189,19 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
 
     public void showPrompt(McpPrompt prompt) {
         this.prompt = prompt;
-        titleLabel.setText(prompt.getName());
-        metaLabel.setText(prompt.getSubtitle());
-        String description = prompt.getDescription();
-        descriptionArea.setText(description == null || description.isBlank() ? "（该提示词没有提供描述）" : description);
-        descriptionArea.setCaretPosition(0);
+        renderPromptInfo();
         statusLabel.setText("");
         messagesHost.removeAll();
         rawViewer.setText("");
 
         argFields.clear();
         argsHost.removeAll();
+        requiredStars.clear();
+        noArgsHint = null;
         if (prompt.getArguments().isEmpty()) {
-            JBLabel none = Ui.hint("该提示词没有参数");
+            JBLabel none = Ui.hint(I18n.t("prompt.args.none"));
             none.setBorder(JBUI.Borders.empty(4, 2));
+            noArgsHint = none;
             argsHost.add(none, new GridBagConstraints());
         } else {
             int row = 0;
@@ -199,7 +222,8 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
                 if (argument.isRequired()) {
                     JBLabel star = new JBLabel(" *");
                     star.setForeground(JBColor.RED);
-                    star.setToolTipText("必填");
+                    star.setToolTipText(I18n.t("prompt.arg.required"));
+                    requiredStars.add(star);
                     label.add(star);
                 }
 
@@ -246,13 +270,27 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         argsHost.revalidate();
         argsHost.repaint();
         fetchButton.setEnabled(true);
+        promptStatus = PromptStatus.IDLE;
         setBusy(false);
+    }
+
+    /** 从绑定的 prompt 重画标题 / 副标题 / 描述（不碰参数区，那会清掉用户已输入的值）。 */
+    private void renderPromptInfo() {
+        if (prompt == null) {
+            return;
+        }
+        titleLabel.setText(prompt.getName());
+        metaLabel.setText(prompt.getSubtitle());
+        String description = prompt.getDescription();
+        descriptionArea.setText(description == null || description.isBlank()
+                ? I18n.t("prompt.description.empty") : description);
+        descriptionArea.setCaretPosition(0);
     }
 
     private void setBusy(boolean value) {
         busy = value;
         fetchButton.setEnabled(!value && prompt != null);
-        fetchButton.setText(value ? "获取中…" : "获取");
+        fetchButton.setText(value ? I18n.t("prompt.fetch.busy") : I18n.t("prompt.fetch.label"));
     }
 
     // ------------------------------------------------------------------
@@ -275,14 +313,18 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
             }
         }
         if (!missing.isEmpty()) {
+            promptStatus = PromptStatus.MISSING_REQUIRED;
+            missingRequired = missing;
             statusLabel.setForeground(Ui.ERROR);
-            statusLabel.setText("缺少必填参数：" + String.join("、", missing));
+            statusLabel.setText(I18n.t("prompt.status.missingRequired",
+                    String.join(I18n.t("prompt.arg.separator"), missing)));
             return;
         }
 
         setBusy(true);
+        promptStatus = PromptStatus.FETCHING;
         statusLabel.setForeground(JBColor.GRAY);
-        statusLabel.setText("正在获取…");
+        statusLabel.setText(I18n.t("prompt.status.fetching"));
         messagesHost.removeAll();
         messagesHost.revalidate();
         callback.getPrompt(prompt, arguments);
@@ -290,46 +332,121 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
 
     public void showResult(McpCallResult result) {
         setBusy(false);
-        messagesHost.removeAll();
+        lastResult = result;
+        showErrorMode = false;
         if (result == null) {
+            messagesHost.removeAll();
+            messagesHost.revalidate();
+            messagesHost.repaint();
             return;
         }
         rawViewer.setText(JsonUtil.pretty(result.getRaw()));
 
         if (result.getError() != null) {
+            promptStatus = PromptStatus.FAILED;
             statusLabel.setForeground(Ui.ERROR);
-            statusLabel.setText("获取失败");
-            messagesHost.add(Ui.textBody(result.getError(), 0, Ui.ERROR));
+            statusLabel.setText(I18n.t("prompt.status.failed"));
         } else {
+            promptStatus = PromptStatus.DONE;
             statusLabel.setForeground(Ui.OK);
-            statusLabel.setText("完成 · " + result.getElapsedMillis() + " ms");
-            String description = JsonUtil.str(result.getRaw(), "description", null);
-            if (description != null && !description.isBlank()) {
-                messagesHost.add(messageCard("说明", description));
+            statusLabel.setText(I18n.t("prompt.status.done", result.getElapsedMillis()));
+        }
+        renderMessages();
+    }
+
+    public void showError(String message) {
+        setBusy(false);
+        showErrorMode = true;
+        lastErrorBody = message;
+        lastResult = null;
+        promptStatus = PromptStatus.FAILED;
+        statusLabel.setForeground(Ui.ERROR);
+        statusLabel.setText(I18n.t("prompt.status.failed"));
+        renderMessages();
+    }
+
+    /** 按当前语言重画消息区；只重放已存结果，不触发网络、不碰用户输入。 */
+    private void renderMessages() {
+        messagesHost.removeAll();
+        if (showErrorMode) {
+            if (lastErrorBody != null) {
+                messagesHost.add(Ui.textBody(lastErrorBody, 0, Ui.ERROR));
             }
-            JsonArray messages = JsonUtil.array(result.getRaw(), "messages");
-            int index = 1;
-            for (JsonElement element : messages) {
-                if (element.isJsonObject()) {
-                    messagesHost.add(renderMessage(element.getAsJsonObject(), index++));
+        } else if (lastResult != null) {
+            if (lastResult.getError() != null) {
+                messagesHost.add(Ui.textBody(lastResult.getError(), 0, Ui.ERROR));
+            } else {
+                String description = JsonUtil.str(lastResult.getRaw(), "description", null);
+                if (description != null && !description.isBlank()) {
+                    messagesHost.add(messageCard(I18n.t("prompt.card.description"), description));
                 }
-            }
-            if (messages.isEmpty()) {
-                messagesHost.add(messageCard("结果", "服务端没有返回 messages。"));
+                JsonArray messages = JsonUtil.array(lastResult.getRaw(), "messages");
+                int index = 1;
+                for (JsonElement element : messages) {
+                    if (element.isJsonObject()) {
+                        messagesHost.add(renderMessage(element.getAsJsonObject(), index++));
+                    }
+                }
+                if (messages.isEmpty()) {
+                    messagesHost.add(messageCard(I18n.t("prompt.card.result"), I18n.t("prompt.empty.messages")));
+                }
             }
         }
         messagesHost.revalidate();
         messagesHost.repaint();
     }
 
-    public void showError(String message) {
-        setBusy(false);
-        statusLabel.setForeground(Ui.ERROR);
-        statusLabel.setText("获取失败");
-        messagesHost.removeAll();
-        messagesHost.add(Ui.textBody(message, 0, Ui.ERROR));
-        messagesHost.revalidate();
-        messagesHost.repaint();
+    /** 语言切换时重画所有界面文字；不碰参数区与用户输入，可随时安全调用。 */
+    public void applyTexts() {
+        fetchButton.setToolTipText(I18n.t("prompt.fetch.tooltip"));
+        fetchButton.setText(I18n.t(busy ? "prompt.fetch.busy" : "prompt.fetch.label"));
+        tabs.setTitleAt(0, I18n.t("prompt.tab.messages"));
+        tabs.setTitleAt(1, I18n.t("prompt.tab.raw"));
+
+        if (prompt == null) {
+            titleLabel.setText(I18n.t("prompt.title.empty"));
+            metaLabel.setText("");
+            descriptionArea.setText(I18n.t("prompt.help.text"));
+            descriptionArea.setCaretPosition(0);
+        } else {
+            renderPromptInfo();
+        }
+
+        if (noArgsHint != null) {
+            noArgsHint.setText(I18n.t("prompt.args.none"));
+        }
+        for (JBLabel star : requiredStars) {
+            star.setToolTipText(I18n.t("prompt.arg.required"));
+        }
+
+        renderPromptStatus();
+        renderMessages();
+    }
+
+    private void renderPromptStatus() {
+        switch (promptStatus) {
+            case IDLE:
+                statusLabel.setText("");
+                break;
+            case MISSING_REQUIRED:
+                statusLabel.setForeground(Ui.ERROR);
+                statusLabel.setText(I18n.t("prompt.status.missingRequired",
+                        String.join(I18n.t("prompt.arg.separator"), missingRequired)));
+                break;
+            case FETCHING:
+                statusLabel.setForeground(JBColor.GRAY);
+                statusLabel.setText(I18n.t("prompt.status.fetching"));
+                break;
+            case FAILED:
+                statusLabel.setForeground(Ui.ERROR);
+                statusLabel.setText(I18n.t("prompt.status.failed"));
+                break;
+            case DONE:
+                statusLabel.setForeground(Ui.OK);
+                statusLabel.setText(I18n.t("prompt.status.done",
+                        lastResult == null ? 0 : lastResult.getElapsedMillis()));
+                break;
+        }
     }
 
     private JComponent renderMessage(JsonObject message, int index) {
@@ -337,7 +454,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         JsonElement content = message.get("content");
         String text;
         if (content == null || content.isJsonNull()) {
-            text = "（无内容）";
+            text = I18n.t("prompt.card.noContent");
         } else if (content.isJsonPrimitive()) {
             text = content.getAsString();
         } else if (content.isJsonObject()) {
@@ -351,7 +468,7 @@ public final class PromptDetailPanel extends JPanel implements Disposable {
         } else {
             text = JsonUtil.pretty(content);
         }
-        String title = "消息 " + index + "  ·  " + role;
+        String title = I18n.t("prompt.card.message", index, role);
         return messageCard(title, text);
     }
 

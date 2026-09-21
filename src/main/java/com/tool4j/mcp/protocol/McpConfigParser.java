@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.model.TransportType;
@@ -56,7 +57,7 @@ public final class McpConfigParser {
         Parsed parsed = new Parsed();
         String text = jsonText == null ? "" : jsonText.strip();
         if (text.isEmpty()) {
-            parsed.warnings.add("内容为空");
+            parsed.warnings.add(I18n.t("cfg.warn.empty"));
             return parsed;
         }
 
@@ -64,11 +65,13 @@ public final class McpConfigParser {
         try {
             root = JsonUtil.parseLenient(text);
         } catch (RuntimeException e) {
-            parsed.warnings.add("JSON 解析失败：" + JsonUtil.rootMessage(e));
+            // 直接用它自己的消息：JsonUtil.parseLenient 抛的 IllegalArgumentException 正文
+            // 已经是「JSON 解析失败：<细节>」了，这里再拼一次前缀会变成"解析失败：解析失败：…"。
+            parsed.warnings.add(JsonUtil.rootMessage(e));
             return parsed;
         }
         if (root == null || root.isJsonNull()) {
-            parsed.warnings.add("JSON 内容为空");
+            parsed.warnings.add(I18n.t("cfg.warn.jsonEmpty"));
             return parsed;
         }
 
@@ -82,7 +85,7 @@ public final class McpConfigParser {
             return parsed;
         }
         if (!root.isJsonObject()) {
-            parsed.warnings.add("顶层既不是对象也不是数组，无法识别");
+            parsed.warnings.add(I18n.t("cfg.warn.notObjectOrArray"));
             return parsed;
         }
 
@@ -105,7 +108,7 @@ public final class McpConfigParser {
                 if (e.getValue().isJsonObject()) {
                     parseNamedEntry(e.getKey(), e.getValue().getAsJsonObject(), parsed);
                 } else {
-                    parsed.warnings.add("跳过 " + e.getKey() + "：配置不是对象");
+                    parsed.warnings.add(I18n.t("cfg.warn.skippedNotObject", e.getKey()));
                 }
             }
             return parsed;
@@ -132,7 +135,7 @@ public final class McpConfigParser {
             return parsed;
         }
 
-        parsed.warnings.add("没找到 mcpServers / servers 字段，也不是裸的服务器映射");
+        parsed.warnings.add(I18n.t("cfg.warn.noServerMap"));
         return parsed;
     }
 
@@ -173,11 +176,11 @@ public final class McpConfigParser {
         }
 
         if (transport == TransportType.STDIO && (command == null || command.isBlank())) {
-            parsed.warnings.add("跳过 " + label + "：stdio 配置缺少 command");
+            parsed.warnings.add(I18n.t("cfg.warn.skipNoCommand", label));
             return false;
         }
         if (transport != TransportType.STDIO && (url == null || url.isBlank())) {
-            parsed.warnings.add("跳过 " + label + "：HTTP/SSE 配置缺少 url");
+            parsed.warnings.add(I18n.t("cfg.warn.skipNoUrl", label));
             return false;
         }
 
@@ -232,8 +235,7 @@ public final class McpConfigParser {
             }
         }
         if (!hits.isEmpty()) {
-            parsed.warnings.add(label + " 里有 " + String.join("/", hits)
-                    + " 使用了 ${...} 占位符，本插件不会展开它，请改成真实值");
+            parsed.warnings.add(I18n.t("cfg.warn.placeholders", label, String.join("/", hits)));
         }
     }
 

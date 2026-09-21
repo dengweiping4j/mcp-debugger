@@ -4,6 +4,7 @@ import com.intellij.ui.components.JBCheckBox;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.util.ui.JBUI;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.KeyValue;
 
 import javax.swing.JButton;
@@ -29,10 +30,17 @@ public final class KeyValueTable extends JPanel {
     private final DefaultTableModel model;
     private final JTable table;
     private final JBCheckBox reveal;
+    private final JButton addButton;
+    private final JButton removeButton;
+    /** 列表头文案由调用方传入，存下来以便切语言时重新设置（不触碰数据）。 */
+    private final String colKeyTitle;
+    private final String colValueTitle;
 
     public KeyValueTable(String keyTitle, String valueTitle, boolean initiallyVisible) {
         super(new BorderLayout());
         setOpaque(false);
+        this.colKeyTitle = keyTitle;
+        this.colValueTitle = valueTitle;
 
         model = new DefaultTableModel(new Object[]{keyTitle, valueTitle}, 0) {
             @Override
@@ -48,12 +56,12 @@ public final class KeyValueTable extends JPanel {
         table.getColumnModel().getColumn(1).setPreferredWidth(JBUI.scale(220));
         table.setDefaultRenderer(Object.class, new MaskingRenderer());
 
-        reveal = new JBCheckBox("显示敏感值", false);
-        reveal.setToolTipText("键名含 token / key / secret / auth 等的值默认打码显示，这只是显示效果");
+        reveal = new JBCheckBox(I18n.t("ui.reveal"), false);
+        reveal.setToolTipText(I18n.t("ui.revealTooltip"));
         reveal.addActionListener(e -> table.repaint());
 
-        JButton add = new JButton("添加");
-        add.addActionListener(e -> {
+        addButton = new JButton(I18n.t("ui.row.add"));
+        addButton.addActionListener(e -> {
             model.addRow(new Object[]{"", ""});
             int last = model.getRowCount() - 1;
             table.getSelectionModel().setSelectionInterval(last, last);
@@ -62,8 +70,8 @@ public final class KeyValueTable extends JPanel {
             }
         });
 
-        JButton remove = new JButton("删除");
-        remove.addActionListener(e -> {
+        removeButton = new JButton(I18n.t("ui.row.remove"));
+        removeButton.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
             for (int i = rows.length - 1; i >= 0; i--) {
                 if (rows[i] >= 0 && rows[i] < model.getRowCount()) {
@@ -78,9 +86,9 @@ public final class KeyValueTable extends JPanel {
         JPanel buttons = new JPanel();
         buttons.setOpaque(false);
         buttons.setLayout(new javax.swing.BoxLayout(buttons, javax.swing.BoxLayout.X_AXIS));
-        buttons.add(add);
+        buttons.add(addButton);
         buttons.add(Ui.hgap(4));
-        buttons.add(remove);
+        buttons.add(removeButton);
         buttons.add(javax.swing.Box.createHorizontalGlue());
         buttons.add(reveal);
         buttons.setBorder(JBUI.Borders.emptyTop(4));
@@ -90,6 +98,20 @@ public final class KeyValueTable extends JPanel {
 
         if (initiallyVisible) {
             reveal.setSelected(true);
+        }
+        applyTexts();
+    }
+
+    /** 重贴所有用户可见文案；语言切换时由外层统一级联调用，幂等且不碰数据。 */
+    public void applyTexts() {
+        reveal.setText(I18n.t("ui.reveal"));
+        reveal.setToolTipText(I18n.t("ui.revealTooltip"));
+        addButton.setText(I18n.t("ui.row.add"));
+        removeButton.setText(I18n.t("ui.row.remove"));
+        if (table.getTableHeader() != null) {
+            table.getColumnModel().getColumn(0).setHeaderValue(colKeyTitle);
+            table.getColumnModel().getColumn(1).setHeaderValue(colValueTitle);
+            table.getTableHeader().repaint();
         }
     }
 
@@ -129,7 +151,7 @@ public final class KeyValueTable extends JPanel {
                 String keyText = key == null ? "" : key.toString();
                 if (KeyValue.looksSensitive(keyText)) {
                     String text = value == null ? "" : value.toString();
-                    shown = text.isEmpty() ? "" : "••••••••（" + text.length() + " 字符）";
+                    shown = text.isEmpty() ? "" : I18n.t("ui.masked", text.length());
                 }
             }
             return super.getTableCellRendererComponent(source, shown, selected, focused, row, column);

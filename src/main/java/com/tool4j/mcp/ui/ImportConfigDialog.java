@@ -15,6 +15,7 @@ import com.intellij.ui.components.JBTabbedPane;
 import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 
+import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.McpServerConfig;
 import com.tool4j.mcp.protocol.McpConfigParser;
 import com.tool4j.mcp.util.McpConfigFiles;
@@ -78,8 +79,11 @@ public final class ImportConfigDialog extends DialogWrapper {
         this.editorHolder = Disposer.newDisposable("McpImportDialogEditors");
         this.pasteField = Editors.jsonEditor(project, "", editorHolder);
 
-        setTitle("导入 MCP 配置");
-        setOKButtonText("导入");
+        // 这个对话框每次导入都新建一个，所以构造时取一次文案就够，不需要 applyTexts()
+        setTitle(I18n.t("imp.title"));
+        setOKButtonText(I18n.t("imp.ok"));
+        setCancelButtonText(I18n.t("ui.cancel"));
+
         init();
         tabs.setSelectedIndex(initial == Source.FILES ? 0 : 1);
     }
@@ -96,8 +100,8 @@ public final class ImportConfigDialog extends DialogWrapper {
 
     @Override
     protected @Nullable JComponent createCenterPanel() {
-        tabs.addTab("从配置文件导入", Ui.wrap(buildFilesTab(), 8, 8, 8, 8));
-        tabs.addTab("粘贴 JSON", Ui.wrap(buildPasteTab(), 8, 8, 8, 8));
+        tabs.addTab(I18n.t("imp.tab.files"), Ui.wrap(buildFilesTab(), 8, 8, 8, 8));
+        tabs.addTab(I18n.t("imp.tab.paste"), Ui.wrap(buildPasteTab(), 8, 8, 8, 8));
         tabs.addChangeListener(e -> updatePreview());
         tabs.setPreferredSize(new Dimension(JBUI.scale(620), JBUI.scale(400)));
 
@@ -136,15 +140,14 @@ public final class ImportConfigDialog extends DialogWrapper {
         JBScrollPane previewScroll = new JBScrollPane(filePreview);
         previewScroll.setPreferredSize(new Dimension(JBUI.scale(600), JBUI.scale(150)));
         previewScroll.setBorder(JBUI.Borders.customLine(JBColor.border()));
-        panel.add(Ui.vbox(Ui.sectionTitle("解析结果"), previewScroll), BorderLayout.SOUTH);
+        panel.add(Ui.vbox(Ui.sectionTitle(I18n.t("imp.preview.title")), previewScroll), BorderLayout.SOUTH);
         return panel;
     }
 
     private JComponent buildPasteTab() {
         JPanel panel = new JPanel(new BorderLayout(0, JBUI.scale(6)));
         panel.setOpaque(false);
-        panel.add(Ui.htmlHint("把 Claude Desktop / Cursor 的配置文件内容整个粘进来就行——"
-                + "<code>mcpServers</code> 外层、单个服务器的对象、甚至一个 <code>[{...}]</code> 数组都能认。"), BorderLayout.NORTH);
+        panel.add(Ui.htmlHint(I18n.t("imp.paste.hint")), BorderLayout.NORTH);
         panel.add(Editors.sized(pasteField, 320), BorderLayout.CENTER);
         return panel;
     }
@@ -174,11 +177,9 @@ public final class ImportConfigDialog extends DialogWrapper {
             fileModel.addElement(candidate);
         }
         if (candidates.isEmpty()) {
-            fileHint.setText("<html>没找到现成的配置文件（扫过 Claude Desktop、Cursor、VS Code 与工程内的 .mcp.json 等位置）。"
-                    + "换「粘贴 JSON」页签，把配置内容直接粘进来。</html>");
+            fileHint.setText(I18n.t("imp.files.empty"));
         } else {
-            fileHint.setText("<html>在下面这些位置找到了 " + candidates.size() + " 个配置文件。"
-                    + "选中一个，下方会显示能解析出哪些服务器。</html>");
+            fileHint.setText(I18n.t("imp.files.found", candidates.size()));
         }
     }
 
@@ -206,12 +207,12 @@ public final class ImportConfigDialog extends DialogWrapper {
     private void updatePreview() {
         if (tabs.getSelectedIndex() == 1) {
             // 粘贴页签的内容随打随变，实时解析会把大段 JSON 反复跑一遍，这里只在点「导入」时校验
-            filePreview.setText("（粘贴页签的内容会在点「导入」时解析）");
+            filePreview.setText(I18n.t("imp.preview.pasteDeferred"));
             return;
         }
         McpConfigFiles.Candidate selected = fileList.getSelectedValue();
         if (selected == null) {
-            filePreview.setText("（没有选中的文件）");
+            filePreview.setText(I18n.t("imp.preview.noSelection"));
             return;
         }
         renderPreview(selected.getLabel(), selected.getPath(), parse(currentText()));
@@ -221,11 +222,10 @@ public final class ImportConfigDialog extends DialogWrapper {
         StringBuilder sb = new StringBuilder();
         sb.append(label).append('\n').append(path).append("\n\n");
         if (result.getServers().isEmpty()) {
-            sb.append("没有解析出服务器。\n");
-            sb.append("常见原因：这份配置里没有 mcpServers 这一段；"
-                    + "或者它用的是别的工具的私有格式。\n");
+            sb.append(I18n.t("imp.preview.noServers")).append('\n');
+            sb.append(I18n.t("imp.preview.noServersReason")).append('\n');
         } else {
-            sb.append("共 ").append(result.getServers().size()).append(" 个服务器：\n");
+            sb.append(I18n.t("imp.preview.serverCount", result.getServers().size())).append('\n');
             for (McpServerConfig config : result.getServers()) {
                 sb.append("  · ").append(config.getDisplayName())
                         .append("  [").append(config.getTransport().getDisplayName()).append("]  ")
@@ -234,7 +234,7 @@ public final class ImportConfigDialog extends DialogWrapper {
             }
         }
         for (String warning : result.getWarnings()) {
-            sb.append("\n注意：").append(warning).append('\n');
+            sb.append("\n").append(I18n.t("imp.preview.warning")).append(warning).append('\n');
         }
         filePreview.setText(sb.toString());
         filePreview.setCaretPosition(0);
@@ -249,20 +249,20 @@ public final class ImportConfigDialog extends DialogWrapper {
         if (tabs.getSelectedIndex() == 1) {
             String text = pasteField.getText();
             if (text == null || text.isBlank()) {
-                return new ValidationInfo("请把 JSON 内容粘贴进来", pasteField);
+                return new ValidationInfo(I18n.t("imp.validate.pasteEmpty"), pasteField);
             }
             if (parse(text).getServers().isEmpty()) {
-                return new ValidationInfo("这段内容里没有解析出任何服务器，检查一下是不是少了 mcpServers",
+                return new ValidationInfo(I18n.t("imp.validate.pasteNoServers"),
                         pasteField);
             }
             return null;
         }
         McpConfigFiles.Candidate selected = fileList.getSelectedValue();
         if (selected == null) {
-            return new ValidationInfo("请先选中一个配置文件", fileList);
+            return new ValidationInfo(I18n.t("imp.validate.noFileSelected"), fileList);
         }
         if (parse(currentText()).getServers().isEmpty()) {
-            return new ValidationInfo("这个文件里没有解析出服务器，换一个试试", fileList);
+            return new ValidationInfo(I18n.t("imp.validate.fileNoServers"), fileList);
         }
         return null;
     }

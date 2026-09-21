@@ -6,6 +6,8 @@ import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 
+import com.tool4j.mcp.settings.LanguageSupport;
+
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -21,6 +23,10 @@ public final class McpToolWindowFactory implements ToolWindowFactory {
 
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
+        // 界面出现之前先把语言定下来：I18n 是纯 JDK 的，它自己不知道 IDE 用的是中文还是英文，
+        // 只能由这里（或任何"界面即将出现"的入口）把 LanguageSupport 的判定结果喂进去。
+        LanguageSupport.apply();
+
         McpPanel panel = new McpPanel(project, toolWindow.getDisposable());
         Content content = ContentFactory.getInstance().createContent(panel, "", false);
         content.setDisposer(panel);
