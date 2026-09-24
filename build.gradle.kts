@@ -81,8 +81,19 @@ intellijPlatform {
                 already in place, and <code>${'$'}ref</code> / <code>allOf</code> are resolved. Edit the
                 values you care about, delete the rest, press <code>Ctrl+Enter</code>. The raw tool
                 definition (annotations, output schema) is one tab away.</li>
-                <li><b>Call history</b> — the arguments of every call are kept per tool, so retrying with
-                one value changed takes a click instead of retyping.</li>
+                <li><b>Call history</b> — every call is kept per tool as a card carrying a single
+                line: outcome, time and duration. The arguments and the response preview live in the
+                hover tooltip, and a <b>Call again</b> button on the card re-sends that exact request
+                at once. Repeating a call with one value changed takes a click instead of retyping.</li>
+                <li><b>Request headers on two levels</b> — server-level headers (the entry sits in the
+                toolbar, so it stays reachable while disconnected) ride on every request, the
+                <code>initialize</code> handshake and the SSE connection included. Per-tool headers live
+                on a tab of each tool, ride only on that tool's <code>tools/call</code>, and win on a
+                name clash. Both are filled in as a form, not raw JSON: the name column offers the
+                common headers in a drop-down, and sensitive values can be masked.</li>
+                <li><b>Self-healing connections</b> — a dropped SSE long connection no longer wipes the
+                tool list: the catalog stays on screen, marked as disconnected, while the plugin
+                reconnects on an exponential backoff.</li>
                 <li><b>Results, verbatim</b> — the JSON-RPC result is shown as-is, in a highlighted,
                 scrollable editor, with one copy button and the round-trip time next to the status.</li>
                 <li><b>Wire-level console</b> — every request, response, notification and stderr line is
@@ -106,7 +117,14 @@ intellijPlatform {
                 <li><b>参数直接写 JSON，进来就有模板</b>：选中工具即按其 JSON Schema 生成一份参数模板——声明的每个
                 参数都在，默认值已填好，<code>${'$'}ref</code> 与 <code>allOf</code> 会被展开。改掉关心的几个值、
                 删掉多余的字段，<code>Ctrl+Enter</code> 调用；工具原始定义（annotations、输出 schema）就在隔壁页签。</li>
-                <li><b>调用历史</b>：每个工具的每次调用都留档入参，点一下即填回 JSON 页签，改一个值再重发只要一次点击。</li>
+                <li><b>调用历史</b>：每个工具的每次调用都留档成一张卡片，一行写清状态、时刻、耗时；入参与
+                响应预览放在悬停气泡里，卡片上的「重新调用」直接把这一份再发一次。</li>
+                <li><b>请求头分两级</b>：服务器级（入口在工具栏，没连上时也够得着）带在所有请求上，含
+                <code>initialize</code> 握手与 SSE 建连；工具级在各自工具的页签里，只作用于该工具的
+                <code>tools/call</code>，同名键覆盖服务器级。两级都按表单填写而不是手写 JSON：
+                键那一列可从下拉里挑常用头，值可一键打码。</li>
+                <li><b>断连自愈</b>：SSE 长连接被掐断后工具列表不再消失（照常显示、标记为已断开），
+                插件按退避自动重连。</li>
                 <li><b>结果原样呈现</b>：调用结果直接显示为 JSON（语法高亮、可滚动），一个「复制」按钮拿走同一份
                 内容，调用耗时显示在状态旁边。</li>
                 <li><b>报文级日志</b>：请求、响应、通知、子进程 stderr 全部按方向与时间落盘到控制台，
@@ -118,6 +136,44 @@ intellijPlatform {
             </ul>
         """.trimIndent()
         changeNotes = """
+            <b>1.0.5</b>
+            <ul>
+                <li><b>New: request headers on two levels, filled in as a form.</b> Server-level
+                headers now have their own entry in the toolbar, next to the server drop-down, and
+                ride on every request — <code>initialize</code> and the SSE connection included.
+                It stays reachable while disconnected, which is exactly when a server that needs a
+                token needs it, and the dialog can test the connection with the values you have not
+                saved yet. Per-tool headers are a new tab on each tool: they ride only on that
+                tool's <code>tools/call</code> and win over the server-level ones on a name clash.
+                Neither level is hand-written JSON any more — the name column offers the common
+                headers in a drop-down, an empty row is simply ignored, and values whose name looks
+                like a token or a key can be masked.</li>
+                <li><b>New: the history list is card-based.</b> Each call is one card carrying a
+                single line — outcome, time and duration — with a <b>Call again</b> button that
+                re-sends that exact request at once. The arguments and the response preview moved into
+                the hover tooltip, which is now the only place they can be read; the response is
+                recorded too, so two calls with identical arguments can still be told apart (one
+                timed out, the other went through). The outcome is carried by a colour bar on the left
+                rather than by the colour of the text, which keeps it readable on a selected row.</li>
+                <li>The request-header form got taller inputs — 28px against the 22px the parameter
+                fields use. The name column eats into the row there, so the value field can use the
+                extra height.</li>
+                <li>Export keeps the standard fields (<code>command</code> / <code>url</code> /
+                <code>headers</code>) clean and writes per-tool headers into an
+                <code>_mcpDebugger</code> extension, so the same JSON still works in other clients.</li>
+                <li><b>Fixed: a dropped SSE connection forced a failing reconnect, and took the tool
+                list with it.</b> Three causes, all fixed: the transport called itself alive as long as
+                it had ever seen an endpoint (a closed long connection left that field behind), the
+                session layer only checked "was it closed" (so it handed the dead session straight
+                back, failing every request without sending one), and the SSE
+                <code>start()</code> was not re-entrant (a reconnect posted <code>initialize</code> to
+                the previous session's endpoint).</li>
+                <li><b>New: the tool list survives a disconnect, and the plugin reconnects on its
+                own.</b> The last successful catalog is kept per session, so the tree stays on screen
+                (marked disconnected) instead of going blank; reconnects are retried on a backoff of
+                1s → 2s → 4s → 8s → 16s → 30s and stop after six failures. A manual Connect /
+                Disconnect or a server switch cancels a queued retry.</li>
+            </ul>
             <b>1.0.4</b>
             <ul>
                 <li><b>New: English and Chinese UI.</b> Every label, tooltip, dialog button and error

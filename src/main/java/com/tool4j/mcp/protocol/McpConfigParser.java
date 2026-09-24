@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
+import com.tool4j.mcp.model.ToolHeaders;
 import com.tool4j.mcp.model.TransportType;
 
 import java.util.ArrayList;
@@ -31,6 +32,15 @@ import java.util.Map;
  * <p>解析时不会因为某一条坏配置就整体失败：坏的跳过并记一条 warning，好的照常导入。
  */
 public final class McpConfigParser {
+
+    /**
+     * 导出时用来装本插件特有内容的扩展字段。
+     *
+     * <p>工具级请求头别的客户端不认，所以不能混进标准字段里——否则拿这份 JSON 去配 Cursor
+     * 之类的客户端会多出一个没人认识的键。放进 {@code _mcpDebugger} 之后，标准部分保持干净
+     * （谁都能用），我们自己的功能靠导入时读这个扩展补回来。
+     */
+    private static final String EXTENSION_KEY = "_mcpDebugger";
 
     private McpConfigParser() {
     }
@@ -194,6 +204,8 @@ public final class McpConfigParser {
         config.setArgs(stringList(entry.get("args")));
         config.setEnv(keyValues(entry.get("env")));
         config.setHeaders(keyValues(entry.get("headers")));
+        // 工具级请求头是本插件特有的，藏在扩展字段里（见 EXTENSION_KEY）
+        config.setToolHeaders(toolHeaders(entry.get(EXTENSION_KEY)));
         config.setWorkingDir(JsonUtil.str(entry, "cwd", JsonUtil.str(entry, "workingDir", "")));
 
         if (entry.has("disabled") && JsonUtil.bool(entry, "disabled", false)) {
@@ -226,6 +238,16 @@ public final class McpConfigParser {
         for (KeyValue kv : config.getHeaders()) {
             if (kv.getValue() != null && kv.getValue().contains("${")) {
                 hits.add(kv.getKey());
+            }
+        }
+        for (ToolHeaders entry : config.getToolHeaders()) {
+            if (entry == null) {
+                continue;
+            }
+            for (KeyValue kv : entry.getHeaders()) {
+                if (kv.getValue() != null && kv.getValue().contains("${")) {
+                    hits.add(kv.getKey());
+                }
             }
         }
         for (String arg : config.getArgs()) {
@@ -271,6 +293,37 @@ public final class McpConfigParser {
         return out;
     }
 
+    /**
+     * 读扩展字段里的工具级请求头：{@code {"_mcpDebugger": {"toolHeaders": {"工具名": {...}}}}}。
+     *
+     * <p>读不到（别的客户端导出的、或老版本本插件导出的）就当没有——这一层是可选的，
+     * 缺了不影响连接。</p>
+     */
+    private static List<ToolHeaders> toolHeaders(JsonElement extension) {
+        List<ToolHeaders> out = new ArrayList<>();
+        if (extension == null || !extension.isJsonObject()) {
+            return out;
+        }
+        JsonElement node = extension.getAsJsonObject().get("toolHeaders");
+        if (node == null || !node.isJsonObject()) {
+            return out;
+        }
+        for (Map.Entry<String, JsonElement> e : node.getAsJsonObject().entrySet()) {
+            String name = e.getKey() == null ? "" : e.getKey().trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            List<KeyValue> headers = keyValues(e.getValue());
+            if (headers.isEmpty()) {
+                continue;
+            }
+            ToolHeaders entry = new ToolHeaders(name);
+            entry.setHeaders(headers);
+            out.add(entry);
+        }
+        return out;
+    }
+
     // ------------------------------------------------------------------
     // 导出
     // ------------------------------------------------------------------
@@ -303,11 +356,36 @@ public final class McpConfigParser {
             if (!config.isEnabled()) {
                 entry.addProperty("disabled", true);
             }
+            // 工具级请求头是本插件特有的，单独收在扩展字段里，标准字段保持干净
+            JsonObject extension = extensionOf(config);
+            if (extension != null) {
+                entry.add(EXTENSION_KEY, extension);
+            }
             map.add(config.getDisplayName(), entry);
         }
         JsonObject root = new JsonObject();
         root.add("mcpServers", map);
         return JsonUtil.pretty(root);
+    }
+
+    /** 本插件特有的那部分内容；目前只有工具级请求头，没有就返回 null（不写空壳字段）。 */
+    private static JsonObject extensionOf(McpServerConfig config) {
+        JsonObject perTool = new JsonObject();
+        for (ToolHeaders entry : config.getToolHeaders()) {
+            if (entry == null || entry.isEmpty()) {
+                continue;
+            }
+            JsonObject headers = toJsonObject(entry.getHeaders());
+            if (headers.size() > 0) {
+                perTool.add(entry.getToolName().trim(), headers);
+            }
+        }
+        if (perTool.size() == 0) {
+            return null;
+        }
+        JsonObject extension = new JsonObject();
+        extension.add("toolHeaders", perTool);
+        return extension;
     }
 
     private static JsonObject toJsonObject(List<KeyValue> pairs) {

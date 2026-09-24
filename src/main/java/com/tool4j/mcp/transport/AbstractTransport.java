@@ -161,6 +161,22 @@ public abstract class AbstractTransport implements McpTransport {
         }
     }
 
+    /**
+     * 把"已经关过 / 已经报过断开"这两件事复位，供<b>可重入的 {@code start()}</b> 使用。
+     *
+     * <p>{@code userClosed} 与 {@code closedReported} 都是"一次性"的状态：一旦置位，
+     * 除非复位，重新启动的传输会立刻认为自己是死的——请求全部秒失败、断开事件也不再上报。
+     * SSE 断线重连正好要复用同一个传输对象，所以它必须在 {@code start()} 开头调这里。
+     *
+     * <p>顺手清空 {@code pending}：上一代留下的等待箱对应的响应永远不会来了，
+     * 留着只会让下一次同 id 的请求拿到上一代的响应（新实例的 id 又从 1 开始，真的会撞上）。
+     */
+    protected void resetClosedState() {
+        pending.clear();
+        closedReported.set(false);
+        userClosed = false;
+    }
+
     /** 起一个守护线程：IDE 退出时不能因为 MCP 的读写线程卡住进程。 */
     protected static Thread daemonThread(String name, Runnable body) {
         Thread t = new Thread(body, name);

@@ -4,8 +4,6 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.JBSplitter;
 import com.intellij.ui.components.JBLabel;
-import com.intellij.ui.components.JBScrollPane;
-import com.intellij.ui.components.JBTextArea;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
@@ -25,7 +23,6 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.KeyStroke;
 import java.awt.BorderLayout;
-import java.awt.Dimension;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
@@ -44,7 +41,8 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
 
     private final JBLabel titleLabel = new JBLabel(" ");
     private final JBLabel metaLabel = Ui.hint(" ");
-    private final JBTextArea descriptionArea = new JBTextArea();
+    /** 资源描述：单行 + 省略号，鼠标移入看全文；见 {@link OneLineLabel}。 */
+    private final OneLineLabel descriptionLabel = new OneLineLabel();
     private final JBTextField uriField = new JBTextField();
     private final JBLabel statusLabel = Ui.hint("");
     private final JButton readButton = new JButton(I18n.t("res.read.label"));
@@ -93,17 +91,8 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
         titleRow.add(metaLabel);
         titleRow.add(Box.createHorizontalGlue());
 
-        descriptionArea.setEditable(false);
-        descriptionArea.setLineWrap(true);
-        descriptionArea.setWrapStyleWord(true);
-        descriptionArea.setOpaque(false);
-        descriptionArea.setForeground(UIUtil.getLabelForeground());
-        descriptionArea.setBorder(JBUI.Borders.empty(2, 0));
-        JBScrollPane descriptionScroll = new JBScrollPane(descriptionArea);
-        descriptionScroll.setBorder(JBUI.Borders.empty());
-        descriptionScroll.setOpaque(false);
-        descriptionScroll.getViewport().setOpaque(false);
-        descriptionScroll.setPreferredSize(new Dimension(0, JBUI.scale(48)));
+        descriptionLabel.setForeground(UIUtil.getLabelForeground());
+        descriptionLabel.setBorder(JBUI.Borders.emptyTop(2));
 
         uriField.setToolTipText(I18n.t("res.uri.tooltip"));
         uriField.addActionListener(e -> read());
@@ -125,7 +114,7 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
         header.setOpaque(false);
         header.setBorder(JBUI.Borders.empty(6, 8, 4, 8));
         header.add(titleRow, BorderLayout.NORTH);
-        header.add(descriptionScroll, BorderLayout.CENTER);
+        header.add(descriptionLabel, BorderLayout.CENTER);
         header.add(Ui.vbox(uriRow, statusRow), BorderLayout.SOUTH);
         return header;
     }
@@ -153,8 +142,7 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
         status = Status.IDLE;
         titleLabel.setText(I18n.t("res.title.empty"));
         metaLabel.setText("");
-        descriptionArea.setText(I18n.t("res.help.text"));
-        descriptionArea.setCaretPosition(0);
+        descriptionLabel.setFullText(I18n.t("res.help.text"));
         uriField.setText("");
         uriField.setEnabled(false);
         readButton.setEnabled(false);
@@ -188,10 +176,9 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
         }
         metaLabel.setText(meta.toString());
         String description = resource.getDescription();
-        descriptionArea.setText(description == null || description.isBlank()
+        descriptionLabel.setFullText(description == null || description.isBlank()
                 ? I18n.t("res.description.uriPrefix", resource.getUri())
                 : description);
-        descriptionArea.setCaretPosition(0);
     }
 
     private void setBusy(boolean value) {
@@ -256,8 +243,7 @@ public final class ResourceDetailPanel extends JPanel implements Disposable {
         if (resource == null) {
             titleLabel.setText(I18n.t("res.title.empty"));
             metaLabel.setText("");
-            descriptionArea.setText(I18n.t("res.help.text"));
-            descriptionArea.setCaretPosition(0);
+            descriptionLabel.setFullText(I18n.t("res.help.text"));
         } else {
             renderResourceInfo();
         }

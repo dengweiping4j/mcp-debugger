@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 
 import com.tool4j.mcp.protocol.McpException;
 
+import java.util.Map;
+
 /**
  * 一条 MCP 连接的传输通道。
  *
@@ -49,6 +51,20 @@ public interface McpTransport extends AutoCloseable {
      * @param timeoutMillis 等待响应的超时
      */
     JsonObject request(JsonObject request, long timeoutMillis) throws McpException;
+
+    /**
+     * 同上，但为<b>这一次请求</b>额外叠一组头（工具级请求头）。
+     *
+     * <p>为什么要按请求传、而不是给传输层设一个"当前工具"：后者是有状态写法，多个调用并发时
+     * 会互相串味，而且泄漏了"调用哪个工具"这件事的归属——它属于 {@code tools/call} 这次调用，
+     * 不属于连接。stdio 没有 HTTP 头这回事，用默认实现忽略即可。
+     *
+     * @param extraHeaders 服务器级之上再叠的键值对，同名覆盖；可为 null
+     */
+    default JsonObject request(JsonObject request, long timeoutMillis,
+                              Map<String, String> extraHeaders) throws McpException {
+        return request(request, timeoutMillis);
+    }
 
     /** 发一条不需要响应的报文（通知，或对服务端请求的应答）。 */
     void send(JsonObject message) throws McpException;

@@ -35,6 +35,7 @@ import com.tool4j.mcp.model.McpCallResult;
 import com.tool4j.mcp.model.McpPrompt;
 import com.tool4j.mcp.model.McpResource;
 import com.tool4j.mcp.model.McpServerConfig;
+import com.tool4j.mcp.model.McpServerInfo;
 import com.tool4j.mcp.model.McpTool;
 import com.tool4j.mcp.model.ToolCallRecord;
 import com.tool4j.mcp.model.TransportType;
@@ -74,6 +75,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 工具窗口主面板：左边是"当前服务器 → 工具 / 资源 / 提示词"目录树，右边是选中项的详情与调用面板，
@@ -87,6 +92,11 @@ import java.util.Map;
  *       控制台自带"显示报文体"开关，长响应不会把界面撑爆。</li>
  *   <li>同一份配置对应同一个会话（会话缓存在 {@link McpProjectService}），
  *       所以关掉工具窗口再打开，之前拉到的工具列表还在，不用重连。</li>
+ *   <li><b>断连不等于目录失效</b>：工具列表来自会话服务里的一份快照，长连接被掐掉之后
+ *       树照常显示（标成"已断开"），并在后台按退避自动重连。</li>
+ *   <li><b>请求头分两级</b>：服务器级（工具栏第一行的「请求头 · N」按钮 → {@link ServerHeadersDialog}
+ *       弹窗，带在所有请求上，含握手与建连）与工具级（工具详情的「请求头」页签，
+ *       只作用于该工具的调用）。</li>
  *   <li><b>布局按宽度自适应</b>：这个窗口绝大多数时候停靠在 PyCharm / IDEA 的右侧边栏，
  *       宽度只有三四百像素。宽了就左右分栏（目录 | 详情），窄了自动改成上下堆叠——
  *       否则目录会被挤成一条缝。工具栏也据此分成两行：下拉独占一行，动作按钮在下一行。</li>
@@ -98,6 +108,12 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     private static final String CARD_TOOL = "tool";
     private static final String CARD_RESOURCE = "resource";
     private static final String CARD_PROMPT = "prompt";
+
+    /** 自动重连的退避秒数；最后一次之后一直用它。 */
+    private static final int[] RECONNECT_BACKOFF_SECONDS = {1, 2, 4, 8, 16, 30};
+
+    /** 连续失败到这个次数就停下等用户手点——服务端真的没起来时，后台一直撞比停下来更烦人。 */
+    private static final int RECONNECT_MAX_ATTEMPTS = 6;
 
     /** 日志折叠起来时保存的比例，展开时还原。 */
     private static final float LOG_COLLAPSED_PROPORTION = 0.999f;
@@ -113,6 +129,23 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     /** 目录 / 详情这一条分隔线的比例记忆键；判断"用户以前拖过没有"时也要用同一个键。 */
     private static final String SIDE_SPLIT_KEY = "McpDebugger.sideSplit";
 
+    /**
+     * 详情区被允许拖到多窄（逻辑像素）。
+     *
+     * <p><b>为什么必须显式给。</b>{@code Splitter} 默认就 honor 子组件的最小尺寸
+     * （{@code myHonorMinimumSize} 在构造器里写死为 {@code true}，2023.3 字节码实证），
+     * 拖拽时它把分隔条钳在
+     * {@code [第一个组件.min, 总宽 - 分隔条宽 - 第二个组件.min]}。
+     * 而 {@link #detailHost} 是个 {@code CardLayout} 容器，它的最小宽度 = <b>四张卡片里最宽的那张</b>
+     * ——单是详情页里那排页签、动作栏的状态文字、头部徽标就能报到 300px 以上，
+     * 于是分隔条怎么拖都推不到左边，左侧目录里的工具名就被挤得显示不全。
+     *
+     * <p>给了这个值之后，右侧再窄就由各卡片自己裁（页签栏出现滚动箭头、长文字被省略号截掉），
+     * 而不是把整块界面顶住。160 的依据：再窄的话页签和按钮会挤到不能用，
+     * 左侧留下的那 350px 左右刚好够看完整的工具名。
+     */
+    private static final int MIN_DETAIL_WIDTH = 160;
+
     private final Project project;
     private final McpProjectService service;
     private final McpSettings settings = McpSettings.getInstance();
@@ -124,15 +157,17 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     private final JBLabel statusText = new JBLabel();
 
     /**
-     * 一键切换界面语言的按钮。
+     * 服务器级请求头的入口。
      *
-     * <p>放在状态条最右侧（EAST），而<b>不是</b>工具栏里：那一排是"操作这台服务器"的动作，
-     * 5 个按钮在 300px 的侧边栏里已经很挤；语言是整块面板的属性，挨着状态文字更合适。
+     * <p>刻意放在工具栏第一行、与服务器下拉框同排，而<b>不是</b>塞进详情区：
+     * 它不能受连接状态影响。带鉴权的新服务器恰恰是在"还没连上、树是空的"时候最需要填 token 的，
+     * 入口要是住在详情区里就会被空态卡片挡住，首次配置直接死锁。
      *
-     * <p>按钮上写的是"点一下会切到哪"，和工具栏里「连接 / 断开」的呈现方式一致。
-     * 用普通 {@link JButton} 就行——平台上"缺图标就画问号"那条只针对工具栏里的 ActionButton。
+     * <p>点开的是 {@link ServerHeadersDialog}（模态）。放在工具栏而不是做成动作还有一条理由：
+     * 这里的按钮是普通 {@link JButton}，可以按当前配置实时显示条数（「请求头 · 3」），
+     * 而工具栏动作只按图标渲染。
      */
-    private final JButton languageButton = new JButton();
+    private final JButton serverHeadersButton = new JButton();
 
     // ---------------- 开场引导页 ----------------
 
@@ -202,6 +237,21 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     /** 是否已经根据真实宽度定过一次布局；首次定的时候不要覆盖用户拖出来 / 持久化的比例。 */
     private boolean layoutSettled;
 
+    // ---------------- 自动重连 ----------------
+
+    /**
+     * 自动重连的定时器。惰性建，守护线程——否则关掉工具窗口还会有一个线程赖着。
+     *
+     * <p>只在 EDT 上被读写（{@link #scheduleReconnect} 的调用点全在 EDT），所以不加锁。
+     */
+    @Nullable
+    private ScheduledExecutorService reconnector;
+    /** 已经连续自动重连了几次；0 表示当前没有在重连。 */
+    private int reconnectAttempt;
+    /** 待触发的重连任务；用户手动连接 / 断开、或在切服务器时取消它。 */
+    @Nullable
+    private ScheduledFuture<?> reconnectTask;
+
     /** 服务器 id → 我们挂上去的监听器，用于在切换/释放时精确摘掉，避免同一条报文被记两次。 */
     private final Map<String, McpClient.Listener> hooks = new HashMap<>();
 
@@ -258,14 +308,14 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
      * 工具栏。<b>刻意分两行</b>：
      *
      * <pre>
-     * 第一行  [ 服务器下拉框 ................ ]
+     * 第一行  [ 服务器下拉框 ............ ][请求头 · 3]
      * 第二行  [连接][刷新][新建][管理▾][日志]   ● 已连接 · 12 个工具
      * </pre>
      *
      * <p>原来是一行里塞下拉框 + 12 个动作 + 状态文字，在右侧边栏（300~400px）里必然溢出，
      * 于是平台把按钮全压成"没有图标就画问号"的样子。现在：
      * <ul>
-     *   <li>下拉框独占一行，宽度随边栏伸缩；</li>
+     *   <li>下拉框与<b>服务器级请求头入口</b>同排，两者宽度随边栏伸缩；</li>
      *   <li>动作按钮只留 5 个，全部带平台图标（工具栏是按图标渲染的，缺图标就是问号），
      *       编辑 / 删除 / 导入导出收进「管理」下拉；</li>
      *   <li>状态文字放在按钮右侧的剩余空间里，窄了会自动省略号，不会反过来挤压按钮。</li>
@@ -279,9 +329,17 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
                 Math.max(JBUI.scale(24), serverCombo.getPreferredSize().height)));
         serverCombo.addActionListener(e -> onServerSelected());
 
-        JPanel pickerRow = new JPanel(new BorderLayout());
+        serverHeadersButton.setFocusable(false);
+        serverHeadersButton.setMargin(JBUI.insets(0, 4, 0, 4));
+        serverHeadersButton.addActionListener(e -> openServerHeaders());
+
+        JPanel pickerRow = new JPanel(new BorderLayout(JBUI.scale(4), 0));
         pickerRow.setOpaque(false);
         pickerRow.add(serverCombo, BorderLayout.CENTER);
+        // 请求头入口与下拉框同排（理由见 serverHeadersButton 的字段注释）。
+        // 代价是下拉框的可伸缩宽度少了大约 70px——右侧边栏里那点宽度换一个
+        // "不受连接状态影响"的鉴权入口，值。
+        pickerRow.add(serverHeadersButton, BorderLayout.EAST);
 
         toolbarGroup = new DefaultActionGroup();
         toolbarGroup.add(new ConnectAction());
@@ -317,12 +375,6 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         strip.setOpaque(false);
         strip.add(statusDot, BorderLayout.WEST);
         strip.add(statusText, BorderLayout.CENTER);
-
-        // 语言按钮固定在最右：状态文字在 CENTER 上被省略号截断，不会把它挤出去
-        languageButton.setFocusable(false);
-        languageButton.setMargin(JBUI.insets(0, 4, 0, 4));
-        languageButton.addActionListener(e -> toggleLanguage());
-        strip.add(languageButton, BorderLayout.EAST);
         return strip;
     }
 
@@ -337,10 +389,17 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         sideSplit.setSplitterProportionKey(SIDE_SPLIT_KEY);
         sideSplit.setFirstComponent(buildLeftSide());
         sideSplit.setSecondComponent(detailHost);
+        // 详情区的最小宽度得显式压窄，否则它由内容决定（CardLayout 取最宽的那张卡片），
+        // 分隔条会被顶在右边推不动，见 MIN_DETAIL_WIDTH。
+        // 高度不覆盖：那是布局按卡片算出来的，竖排模式下正是"详情区至少留多高"的依据，
+        // 覆盖成 0 就能把它拖没了。
+        Dimension detailMin = new Dimension(detailHost.getMinimumSize());
+        detailMin.width = JBUI.scale(MIN_DETAIL_WIDTH);
+        detailHost.setMinimumSize(detailMin);
         // 这里**不要** setDividerWidth：平台默认 7px，是鼠标能抓住的宽度。
         // 之前设成 2px，分割条的整个"热区"就只有 2px 宽，等于拖不动。
-        // 也不要 setHonorComponentsMinimumSize(true)：一旦某个子面板的最小高度大于可用高度，
-        // 比例会被死死钳住，同样是"拖了没反应"。
+        // 也不要去关 honor minimum（setHonorComponentsMinimumSize(false)）：关了之后
+        // 分隔条可以一路推到另一头把某一侧压成 0 宽，比"拖不动"更糟。
 
         bodySplit = new JBSplitter(true, 0.72f);
         bodySplit.setSplitterProportionKey("McpDebugger.bodySplit");
@@ -471,6 +530,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
 
     /** 重新填充下拉框（新建 / 编辑 / 删除 / 外部变更之后都走这里）。 */
     private void reloadServers() {
+        // 配置被改过了，之前为旧配置排队的自动重连不再有意义
+        cancelReconnect();
         String wanted = settings.getSelectedServerId();
         comboReloading = true;
         try {
@@ -509,6 +570,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         if (comboReloading) {
             return;
         }
+        // 换服务器了：还给上一台排队的自动重连要撤掉，否则它会在后台把旧服务器连起来
+        cancelReconnect();
         McpServerConfig config = currentConfig();
         settings.setSelectedServerId(config == null ? "" : config.getId());
         rebuildTree();
@@ -544,6 +607,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         if (config == null || busy) {
             return;
         }
+        // 手动操作优先：把还排着队的自动重连撤掉，接下来的成败由这一次说了算
+        cancelReconnect();
         if (service.isConnected(config.getId())) {
             service.close(config.getId());
             console.appendInfo(I18n.t("panel.log.disconnected", config.getDisplayName()));
@@ -564,6 +629,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         setStage("panel.stage.connecting", config.getDisplayName());
         console.appendInfo(I18n.t("panel.log.connecting", config.getDisplayName(),
                 config.getTransport().getDisplayName(), config.getEndpointSummary()));
+        // 用户点「连接」时把详情区切回空态。请求头弹窗是模态的——填 token 的时候主面板根本点不到，
+        // 所以这里不再需要"别把请求头编辑器切走"那层保护：顺序由弹窗自己保证（先确定，再回去点连接）。
         if (userInitiated) {
             showIdle();
         }
@@ -578,11 +645,16 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
                     busy = false;
                     clearStage();
                     config.setLastConnectOk(true);
+                    int attempts = reconnectAttempt;
+                    reconnectAttempt = 0;
                     rebuildTree();
                     selectFirstLeaf();
                     console.appendInfo(I18n.t("panel.log.connected", config.getDisplayName(),
                             connected.getServerInfo() == null ? I18n.t("panel.log.noServerInfo")
                                     : connected.getServerInfo().getSummary()));
+                    if (attempts > 0) {
+                        console.appendInfo(I18n.t("panel.log.reconnected", attempts));
+                    }
                 },
                 error -> {
                     busy = false;
@@ -590,6 +662,10 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
                     config.setLastConnectOk(false);
                     console.appendError(I18n.t("panel.log.connectFailed", McpException.describe(error)));
                     rebuildTree();
+                    // 这一次是自动重连发起的：继续退避重试，直到把次数用满
+                    if (reconnectAttempt > 0) {
+                        scheduleReconnect(config.getId());
+                    }
                 });
     }
 
@@ -618,6 +694,76 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
                     updateStatus();
                     console.appendError(I18n.t("panel.log.refreshFailed", McpException.describe(error)));
                 });
+    }
+
+    // ==================================================================
+    // 断线自动重连
+    // ==================================================================
+
+    /**
+     * 被动断开后自动重连。
+     *
+     * <p><b>为什么值得自动做。</b>SSE 的长连接被对端掐掉是常态——服务端空闲超时、反向代理
+     * 滚动重启、本地代理切断空闲连接，哪一个都不代表服务端坏了。让用户"看见断了 → 点连接"
+     * 等于把这类无关紧要的抖动变成一次手工操作。
+     *
+     * <p><b>退避。</b>1s → 2s → 4s → 8s → 16s → 30s，连败 {@value #RECONNECT_MAX_ATTEMPTS}
+     * 次就停下并提示。不无限重试是有意的：服务端真的没起来时，后台每 30 秒撞一次比停下来更烦人，
+     * 而且每一次都会往日志里写字。
+     *
+     * <p>只在"断的正是当前选中的那台服务器"时才重连：给一台已经切走的服务器在后台反复重连，
+     * 用户既看不到也用不上。
+     */
+    private void scheduleReconnect(@NotNull String serverId) {
+        McpServerConfig config = currentConfig();
+        if (disposed || config == null || !serverId.equals(config.getId())) {
+            return;
+        }
+        if (reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+            reconnectAttempt = 0;
+            console.appendError(I18n.t("panel.log.reconnectGaveUp", RECONNECT_MAX_ATTEMPTS));
+            updateStatus();
+            return;
+        }
+        reconnectAttempt++;
+        int delay = RECONNECT_BACKOFF_SECONDS[
+                Math.min(reconnectAttempt - 1, RECONNECT_BACKOFF_SECONDS.length - 1)];
+        console.appendInfo(I18n.t("panel.log.reconnecting",
+                reconnectAttempt, RECONNECT_MAX_ATTEMPTS, delay));
+        updateStatus();
+        reconnectTask = reconnector().schedule(() -> onEdt(() -> {
+            McpServerConfig current = currentConfig();
+            // 排队期间用户可能换了服务器、或者已经手动连上了：这一跳就作废
+            if (disposed || current == null || !serverId.equals(current.getId())
+                    || service.isConnected(serverId) || busy) {
+                return;
+            }
+            connect(current, false);
+        }), delay, TimeUnit.SECONDS);
+    }
+
+    /** 取消排队中的自动重连并清零计数。用户手动连接 / 断开、切服务器、改配置时都要调。 */
+    private void cancelReconnect() {
+        if (reconnectTask != null) {
+            reconnectTask.cancel(false);
+            reconnectTask = null;
+        }
+        if (reconnectAttempt != 0) {
+            reconnectAttempt = 0;
+            updateStatus();
+        }
+    }
+
+    /** 懒建重连定时器。守护线程，且随面板一起关掉——否则关掉工具窗口还会漏一个线程。 */
+    private ScheduledExecutorService reconnector() {
+        if (reconnector == null) {
+            reconnector = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "mcp-debugger-reconnect");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        return reconnector;
     }
 
     /**
@@ -675,7 +821,9 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
                             reason == null ? I18n.t("panel.log.unknownReason") : reason));
                     clearStage();
                     busy = false;
+                    // 工具树刻意不清空：目录快照在 service 里，断线只是暂时不能调用而已
                     rebuildTree();
+                    scheduleReconnect(serverId);
                 });
             }
         };
@@ -717,30 +865,42 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     private void rebuildTree() {
         treeRoot.removeAllChildren();
         McpServerConfig config = currentConfig();
-        // 「请求头」页签跟着当前服务器走：stdio 没有这一页，http / sse 才插到 JSON 与定义之间。
-        // 这个重排很频繁（连接、刷新、切工具都会走到这），所以面板内部对"同一个配置实例"
-        // 只刷新提示文字，不会把用户正敲到一半的内容和光标打回去。
+        // 「请求头」页签跟着当前服务器与当前工具走：stdio 没有这一页；http / sse 上还得选中了工具
+        // 才有可编辑的对象。这个重排很频繁（连接、刷新、切工具都会走到这），所以面板内部对
+        // "同一个 (配置实例, 工具名)" 只刷新提示文字，不会把用户正敲到一半的内容和光标打回去。
         toolDetail.showConfig(config);
         McpClient client = config == null ? null : service.peek(config.getId());
         boolean connected = client != null && client.isConnected();
 
         if (connected) {
-            addGroup(new Group("tool", client.getTools().size()), client.getTools());
-            addGroup(new Group("resource", client.getResources().size()), client.getResources());
-            addGroup(new Group("template", client.getResourceTemplates().size()),
-                    client.getResourceTemplates());
-            addGroup(new Group("prompt", client.getPrompts().size()), client.getPrompts());
+            // 顺手把这次成功的目录记进会话服务——它是断连之后树还能显示的依据
+            service.recordCatalog(config.getId(), client);
+        }
+        // 目录一律从 service 的快照取，不直接读 client：会话被重建（断线自动重连、或上一次
+        // connect() 失败把自己关了）之后 client 里的缓存已经归零，而"这台服务器上有哪些工具"
+        // 并没有因此改变。断连时树照常显示，只是标成离线、调用会失败——
+        // "断线后工具列表整个消失"就是这么来的。
+        McpProjectService.Catalog catalog = config == null ? null : service.catalog(config.getId());
+        boolean hasCatalog = catalog != null && !catalog.isEmpty();
+
+        if (hasCatalog) {
+            addGroup(new Group("tool", catalog.getTools().size()), catalog.getTools());
+            addGroup(new Group("resource", catalog.getResources().size()), catalog.getResources());
+            addGroup(new Group("template", catalog.getResourceTemplates().size()),
+                    catalog.getResourceTemplates());
+            addGroup(new Group("prompt", catalog.getPrompts().size()), catalog.getPrompts());
         }
         treeModel.reload();
 
-        if (connected) {
+        if (hasCatalog) {
             expandAll();
-        } else {
+        } else if (!connected) {
             showIdle();
         }
 
-        updateHeader(connected, client);
+        updateHeader(connected, client, catalog);
         updateStatus();
+        refreshServerHeadersButton();
     }
 
     /**
@@ -749,9 +909,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
      * <p>一个服务器都没配 → 开场引导页（新建 / 导入），这是新用户唯一该看到的东西。
      *
      * <p>已经有服务器、只是没连上（或没选中条目）→ 直接给工具详情面板的空态。
-     * 这不是偷懒：<b>请求头页签就住在那个面板里</b>，而带鉴权的新服务器恰恰是在
-     * "还没连上、树是空的"这一刻需要填 token 的（没有 token 就永远连不上）。
-     * 如果这时换成另一张欢迎页，那一页上没有任何请求头入口，首次配置就会死锁。
+     * 这块空态不再兼任"请求头入口"（服务器级头已经在工具栏第一行，且不受连接状态影响），
+     * 它现在只负责把下一步该做什么说清楚。
      */
     private void showIdle() {
         McpServerConfig config = currentConfig();
@@ -820,7 +979,47 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         detailCards.show(detailHost, card);
     }
 
-    private void updateHeader(boolean connected, @Nullable McpClient client) {
+    /**
+     * 打开服务器级请求头的弹窗（工具栏那个「请求头 · N」按钮）。
+     *
+     * <p>做成模态是刻意的：填 token 这件事的下一步永远是"回去试一次连接"，中间不该有别的东西可点。
+     * 关掉之后无论确定还是取消都刷一遍按钮上的条数——只有点「确定」才写进配置，
+     * 所以取消时读到的还是旧值，正好对上。
+     */
+    private void openServerHeaders() {
+        McpServerConfig config = currentConfig();
+        if (config == null || config.getTransport() == null || !config.getTransport().isHttp()) {
+            return;
+        }
+        ServerHeadersDialog dialog = new ServerHeadersDialog(project, config);
+        dialog.showAndGet();
+        refreshServerHeadersButton();
+    }
+
+    /**
+     * 刷新工具栏那个「请求头 · N」按钮：文字带条数（不打开也能看出 token 在不在）、
+     * stdio 上置灰（子进程没有 HTTP 头这回事）。
+     *
+     * <p>条数直接读配置现算，不再问某个面板——服务器级请求头已经没有常驻的编辑控件了
+     * （它在弹窗里，关掉就没了），配置本身才是唯一的事实来源。
+     */
+    private void refreshServerHeadersButton() {
+        McpServerConfig config = currentConfig();
+        boolean applicable = config != null
+                && config.getTransport() != null && config.getTransport().isHttp();
+        // headerMap() 里已经滤掉空键，和原先在面板里逐个数的结果一致
+        int n = applicable ? config.headerMap().size() : 0;
+        serverHeadersButton.setText(n == 0
+                ? I18n.t("panel.headers.button")
+                : I18n.t("panel.headers.buttonCount", n));
+        serverHeadersButton.setEnabled(applicable);
+        serverHeadersButton.setToolTipText(applicable
+                ? I18n.t("panel.headers.button.tip")
+                : I18n.t("panel.headers.noHttp"));
+    }
+
+    private void updateHeader(boolean connected, @Nullable McpClient client,
+                             @Nullable McpProjectService.Catalog catalog) {
         McpServerConfig config = currentConfig();
         if (config == null) {
             leftTitle.setText(I18n.t("panel.left.none"));
@@ -830,13 +1029,14 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         }
         leftTitle.setText(config.getDisplayName());
         leftTitle.setToolTipText(config.getEndpointSummary());
-        if (!connected) {
+        if (!connected && (catalog == null || catalog.isEmpty())) {
             setSubtitle(config.getEndpointSummary());
             return;
         }
-        int tools = client.getTools().size();
-        int resources = client.getResources().size() + client.getResourceTemplates().size();
-        int prompts = client.getPrompts().size();
+        int tools = catalog == null ? 0 : catalog.getTools().size();
+        int resources = catalog == null ? 0
+                : catalog.getResources().size() + catalog.getResourceTemplates().size();
+        int prompts = catalog == null ? 0 : catalog.getPrompts().size();
         List<String> bits = new ArrayList<>(4);
         bits.add(I18n.t("panel.summary.tools", tools));
         if (resources > 0) {
@@ -845,8 +1045,13 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         if (prompts > 0) {
             bits.add(I18n.t("panel.summary.prompts", prompts));
         }
-        String protocol = client.getServerInfo() == null ? null : client.getServerInfo().getProtocolVersion();
-        String summary = String.join(" · ", bits)
+        McpServerInfo info = client == null ? null : client.getServerInfo();
+        if (info == null && catalog != null) {
+            info = catalog.getServerInfo();
+        }
+        String protocol = info == null ? null : info.getProtocolVersion();
+        String summary = (connected ? "" : I18n.t("panel.summary.offline") + " · ")
+                + String.join(" · ", bits)
                 + (protocol == null || protocol.isBlank() ? "" : " · MCP " + protocol);
         setSubtitle(summary);
     }
@@ -901,6 +1106,12 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
             return;
         }
         if (!service.isConnected(config.getId())) {
+            // 自动重连排队中的时候，状态栏得说清楚"不用你动手，我正在重试"
+            if (reconnectAttempt > 0) {
+                setStatus(Ui.WARN, I18n.t("panel.status.reconnecting",
+                        reconnectAttempt, RECONNECT_MAX_ATTEMPTS));
+                return;
+            }
             setStatus(Ui.MUTED, I18n.t("panel.status.disconnected"));
             return;
         }
@@ -963,6 +1174,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         record.timestamp = System.currentTimeMillis();
         if (result != null) {
             record.elapsedMillis = result.getElapsedMillis();
+            record.response = responsePreview(result);
             if (result.getError() != null) {
                 record.status = ToolCallRecord.Status.FAILED;
                 record.note = abbreviate(result.getError());
@@ -977,16 +1189,51 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
             record.status = ToolCallRecord.Status.FAILED;
             record.elapsedMillis = Math.max(0, System.currentTimeMillis() - startedAt);
             record.note = abbreviate(failure);
+            // 没等到响应，卡片那一行就放失败原因：留空会被读成"响应是空的"，
+            // 而"为什么没响应"恰恰是这条记录最该说的话
+            record.response = record.note;
         }
         McpCallHistory.getInstance().record(record);
     }
 
-    /** 失败原因存进历史前先压成一行并截断：它只服务列表项的 tooltip，不值得占满配置文件。 */
+    /**
+     * 响应预览：把这次回来的东西压成一行，供「历史」卡片显示。
+     *
+     * <p>按"人真正想先看一眼的那一段"依次挑，而不是无脑塞整个 result：
+     * <ol>
+     *   <li><b>协议层错误</b>（没拿到 result）→ 错误文本本身；</li>
+     *   <li><b>结构化输出</b> → {@code structuredContent}，MCP 2025-06-18 之后这是最规整的一份；</li>
+     *   <li><b>标准内容块</b> → 第一个块的 {@code text}，工具返回的大多就是一段文本
+     *       （图片 / 资源这类非文本块退化成它自己的紧凑 JSON）；</li>
+     *   <li>都没有 → 整个 result。</li>
+     * </ol>
+     *
+     * <p>最后统一压成一行再截断：卡片只有一行的高度，换行符留在里面只会把行高算歪。
+     */
+    private static String responsePreview(@NotNull McpCallResult result) {
+        String text;
+        if (result.getError() != null) {
+            text = result.getError();
+        } else if (result.getStructuredContent() != null) {
+            text = JsonUtil.compact(result.getStructuredContent());
+        } else if (!result.getContent().isEmpty()) {
+            JsonObject block = result.getContent().get(0);
+            String blockText = JsonUtil.str(block, "text", null);
+            text = blockText != null ? blockText : JsonUtil.compact(block);
+        } else {
+            text = JsonUtil.compact(result.getRaw());
+        }
+        return truncate(JsonUtil.oneLine(text), McpCallHistory.RESPONSE_LIMIT);
+    }
+
+    /** 失败原因存进历史前先压成一行并截断：它服务列表项的 tooltip，不值得占满配置文件。 */
     private static String abbreviate(@Nullable String text) {
-        String oneLine = JsonUtil.oneLine(text);
-        return oneLine.length() <= McpCallHistory.NOTE_LIMIT
-                ? oneLine
-                : oneLine.substring(0, McpCallHistory.NOTE_LIMIT) + "…";
+        return truncate(JsonUtil.oneLine(text), McpCallHistory.NOTE_LIMIT);
+    }
+
+    private static String truncate(@Nullable String oneLine, int limit) {
+        String text = oneLine == null ? "" : oneLine;
+        return text.length() <= limit ? text : text.substring(0, limit) + "…";
     }
 
     private void readResource(@NotNull McpResource resource, @NotNull String uri) {
@@ -1039,10 +1286,9 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
             return;
         }
         boolean wasConnected = service.isConnected(config.getId());
-        if (wasConnected) {
-            // 配置变了，旧会话不能再用（子进程还是按老命令行拉起来的）
-            service.close(config.getId());
-        }
+        // 配置变了：旧会话不能再用（子进程还是按老命令行拉起来的），目录快照也一并丢掉——
+        // 改过命令行或 URL 之后，旧目录已经不代表这台服务器了，留着只会显示一批点不动的条目
+        service.forget(config.getId());
         dialog.applyTo(config);
         settings.notifyChanged();
         reloadServers();
@@ -1064,7 +1310,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         if (answer != 0) {
             return;
         }
-        service.close(config.getId());
+        service.forget(config.getId());
         unhook(config.getId());
         settings.remove(config);
         // 历史按 serverId 归类；配置没了它就再也选不中、也删不掉，一起清掉
@@ -1175,38 +1421,23 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     // ==================================================================
 
     /**
-     * 一键切换界面语言（中 ↔ 英）。
+     * 显式把界面语言落成某一种（「管理」→「语言切换」里的两个条目）。
      *
-     * <p>{@link LanguageSupport#toggle()} 里会 {@code I18n.setLocale(...)}，那是<b>同步广播</b>：
-     * 我们这个调用还没返回，整棵界面的 {@code applyTexts()} 就已经跑完了。所以下面记日志时
-     * 读到的已经是切换后的语言，那句话本身就是新语言的。
+     * <p>{@link LanguageSupport#setPreference(String)} 里会 {@code I18n.setLocale(...)}，那是
+     * <b>同步广播</b>：我们这个调用还没返回，整棵界面的 {@code applyTexts()} 就已经跑完了。
+     * 所以下面记日志时读到的已经是切换后的语言，那句话本身就是新语言的。
      *
-     * <p>刻意不做成"中 → 英 → 跟随 IDE"三态循环：自动是"复位"而不是第三种语言，
-     * 混进循环里会让用户猜不到下一次点击变成什么。复位入口在「管理」菜单里。
+     * <p>没有"跟随 IDE"这个可点的选项：它只在没有显式偏好时生效（老配置 / 刚装好），
+     * 一旦用户选过语言就没有回头路——想恢复只能手动清配置，界面上不提供。
      */
-    private void toggleLanguage() {
-        LanguageSupport.toggle();
-        logLanguageChange();
-    }
-
-    /** 把显式的语言偏好清回"跟随 IDE"。 */
-    private void followIdeLanguage() {
-        LanguageSupport.setPreference(LanguageSupport.AUTO);
+    private void switchLanguage(String preference) {
+        LanguageSupport.setPreference(preference);
         logLanguageChange();
     }
 
     private void logLanguageChange() {
         console.appendInfo(I18n.t("lang.switched",
                 I18n.t("lang.name." + I18n.getLanguageTag())));
-    }
-
-    /** 语言按钮：字面写"点一下会切到哪"，tooltip 说清当前是什么、会变成什么。 */
-    private void refreshLanguageButton() {
-        boolean chinese = I18n.ZH.equals(I18n.getLanguageTag());
-        languageButton.setText(I18n.t(chinese ? "lang.code.en" : "lang.code.zh"));
-        languageButton.setToolTipText(I18n.t("lang.action.desc",
-                I18n.t(chinese ? "lang.name.zh" : "lang.name.en"),
-                I18n.t(chinese ? "lang.name.en" : "lang.name.zh")));
     }
 
     /**
@@ -1264,6 +1495,11 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     public void dispose() {
         I18n.removeListener(languageListener);
         disposed = true;
+        if (reconnector != null) {
+            reconnector.shutdownNow();
+            reconnector = null;
+        }
+        reconnectTask = null;
         for (String serverId : new HashSet<>(hooks.keySet())) {
             unhook(serverId);
         }
@@ -1396,7 +1632,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     }
 
     /**
-     * 「管理」下拉：编辑 / 删除服务器 + 配置导入导出。
+     * 「管理」下拉：编辑 / 删除服务器 + 配置导入导出 + 语言切换。
      *
      * <p>这些都不是高频操作，摊在工具栏上只会把主按钮挤没——右侧边栏只有三百多像素宽的时候
      * 尤其明显。收进下拉后，工具栏从 12 个按钮降到 5 个。
@@ -1413,7 +1649,7 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
             add(new ImportFromPasteAction());
             add(new ExportAction());
             addSeparator();
-            add(new FollowIdeLanguageAction());
+            add(new LanguageGroup());
         }
 
         @Override
@@ -1516,24 +1752,58 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     }
 
     /**
-     * 把一键切换按下去的显式语言偏好清回"跟随 IDE"。
+     * 「管理」→「语言切换」子菜单：显式选中文或英文。
      *
-     * <p>这是「自动」唯一的入口：状态条上那个按钮只有中 / 英两态。已经是自动时置灰——
-     * 这一项是"复位"，复位过一次就没什么可复的了。
+     * <p>替代了原来状态条右侧的一键切换按钮：两个按钮（服务器级请求头、语言）都挂在最右、
+     * 长短不一不好看，而语言切换本来就是低频操作，收进这里正合适。
+     *
+     * <p>条目文字是 {@code lang.name.*}（中文 / English）——语言名在两份词表里是同一个值，
+     * 刻意用"本名"展示，永远不随界面语言变，所以不需要 {@code retranslate()}。
      */
-    private final class FollowIdeLanguageAction extends PanelAction {
-        FollowIdeLanguageAction() {
-            super("lang.auto.text", "lang.auto.desc", AllIcons.General.Reset);
+    private final class LanguageGroup extends DefaultActionGroup implements Relocalizable {
+        LanguageGroup() {
+            super(I18n.t("lang.menu.text"), true);
+            getTemplatePresentation().setDescription(I18n.t("lang.menu.desc"));
+            add(new SetLanguageAction(LanguageSupport.ZH, "lang.name.zh"));
+            add(new SetLanguageAction(LanguageSupport.EN, "lang.name.en"));
+        }
+
+        @Override
+        public void retranslate() {
+            getTemplatePresentation().setText(I18n.t("lang.menu.text"));
+            getTemplatePresentation().setDescription(I18n.t("lang.menu.desc"));
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+    }
+
+    /** 「语言切换」里的一个条目：点下去把界面语言显式落成某一种。当前已是该语言时置灰。 */
+    private final class SetLanguageAction extends DumbAwareAction {
+        private final String preference;
+
+        SetLanguageAction(@NotNull String preference, @NotNull String nameKey) {
+            // 这版 SDK 的 DumbAwareAction 没有 (String, String) 构造器，只有 Supplier 版；
+            // Supplier 是惰性求值，语言切换后展示层刷新时自动拿到新文案。
+            super(() -> I18n.t(nameKey), () -> I18n.t("lang.menu.desc"));
+            this.preference = preference;
         }
 
         @Override
         public void update(@NotNull AnActionEvent e) {
-            e.getPresentation().setEnabled(!LanguageSupport.isAuto());
+            e.getPresentation().setEnabled(!preference.equals(LanguageSupport.getPreference()));
         }
 
         @Override
         public void actionPerformed(@NotNull AnActionEvent e) {
-            followIdeLanguage();
+            switchLanguage(preference);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
         }
     }
 
@@ -1636,7 +1906,6 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         serverCombo.setToolTipText(I18n.t("panel.combo.tooltip"));
         // 下拉项的文案是渲染时现取的（Slot.toString），所以只要重画
         serverCombo.repaint();
-        refreshLanguageButton();
 
         emptyTitle.setText(I18n.t("panel.empty.title"));
         emptyHint.setText(I18n.t("panel.empty.hint"));
@@ -1659,10 +1928,12 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
         }
         actionToolbar.updateActionsImmediately();
 
-        // 详情区三个子面板各自贴自己的那部分
+        // 详情区三个子面板各自贴自己的那部分。服务器级请求头<b>不在</b>这一层：
+        // 它是模态弹窗、每次都 new 一个，构造期取值即可，也就没必要（没机会）响应语言切换。
         toolDetail.applyTexts();
         resourceDetail.applyTexts();
         promptDetail.applyTexts();
+        refreshServerHeadersButton();
         // 日志控制台是常驻的（不像详情区那三个会随选中项换），但它的标题、开关、清空
         // 与折叠动作同样得跟着切——它是本面板的字段，所以由本面板负责级联。
         console.applyTexts();
@@ -1683,7 +1954,8 @@ public final class McpPanel extends SimpleToolWindowPanel implements Disposable 
     private void updateHeaderForCurrentState() {
         McpServerConfig config = currentConfig();
         McpClient client = config == null ? null : service.peek(config.getId());
-        updateHeader(client != null && client.isConnected(), client);
+        McpProjectService.Catalog catalog = config == null ? null : service.catalog(config.getId());
+        updateHeader(client != null && client.isConnected(), client, catalog);
     }
 
     private static JBColor catalogColor(@NotNull String kind) {

@@ -10,9 +10,7 @@ import com.intellij.ui.EditorTextField;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.JBSplitter;
 import com.intellij.ui.components.JBLabel;
-import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTabbedPane;
-import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
@@ -25,7 +23,6 @@ import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.SchemaUtil;
 
 import org.jetbrains.annotations.Nullable;
-
 import javax.swing.AbstractAction;
 import javax.swing.ActionMap;
 import javax.swing.Box;
@@ -36,7 +33,6 @@ import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.KeyStroke;
 import java.awt.BorderLayout;
-import java.awt.Dimension;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
@@ -51,9 +47,11 @@ import java.util.List;
  *   <li><b>JSON</b>：选中工具时按它的 {@code inputSchema} 预填一份模板——声明的每个参数都在，
  *   值取 schema 的 {@code default}，没 default 的按类型给空值。改哪几个值就发哪几个字段，
  *   多余的删掉即可。</li>
- *   <li><b>请求头</b>（仅 http / sse）：这次请求额外带的头，通常就是 token。
- *   和参数 JSON 是同一件事的两个面，所以放在同一级页签上（Postman 的 Params / Headers 也是这样排的）。
- *   它属于<b>服务器</b>而不是某个工具，切工具不动它，见 {@link #showConfig}。</li>
+ *   <li><b>请求头</b>（仅 http / sse，且选中了具体工具）：<b>这个工具</b>额外带的头，
+ *   只作用于它的 {@code tools/call}，同名键覆盖服务器级。和参数 JSON 是同一件事的两个面，
+ *   所以放在同一级页签上（Postman 的 Params / Headers 也是这么排的），见
+ *   {@link RequestHeadersPanel}。<b>服务器级</b>请求头是另一层，入口在工具栏那个
+ *   「请求头 · N」按钮上（打开 {@link ServerHeadersDialog}）——它挂在服务器上，切工具不该动它。</li>
  *   <li><b>定义</b>：工具原始定义（含 annotations 与 outputSchema）。参数的类型、必填、说明、
  *   默认值都能在这里查到，不用另开文档。</li>
  *   <li><b>历史</b>：这个工具每次调用的入参，点条目即填回 JSON 页签，见 {@link CallHistoryPanel}。
@@ -75,7 +73,13 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
 
     private final JBLabel titleLabel = new JBLabel(" ");
     private final JBLabel badgesLabel = Ui.hint(" ");
-    private final JBTextArea descriptionArea = new JBTextArea();
+    /**
+     * 工具描述：<b>单行 + 省略号</b>，鼠标移入看全文。
+     *
+     * <p>原来是 48px 高的 {@code JTextArea} + 滚动条：两行放不下就只剩滚动，而这一栏
+     * 只是想让人扫一眼"这工具干什么"，不值得吃掉三行高度（{@link OneLineLabel}）。
+     */
+    private final OneLineLabel descriptionLabel = new OneLineLabel();
     private final JBLabel statusLabel = Ui.hint("");
     private final JButton invokeButton = new JButton(I18n.t("tool.action.invoke"));
     private final JButton resetButton = new JButton("");
@@ -94,13 +98,16 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     private final JComponent jsonTab;
     private final JComponent definitionTab;
     private final JBTabbedPane tabs = new JBTabbedPane();
-    /** 与 JSON / 定义 并列的第三个页签；只在 http / sse 上存在。 */
+    /** 与 JSON / 定义 并列的第三个页签：<b>本工具</b>的请求头；只在 http / sse 且选中了工具时存在。 */
     private final RequestHeadersPanel headersPanel;
     /** 与 JSON / 定义 并列的最后一个页签：这个工具的历史入参。 */
     private final CallHistoryPanel historyPanel;
     private final ResultView resultView;
     private final JBSplitter splitter;
 
+    /** 当前绑定的服务器配置；请求头页签在不在、绑到哪个工具，取决于它 + 当前 {@link #tool}。 */
+    @Nullable
+    private McpServerConfig serverConfig;
     private McpTool tool;
     private Callback callback;
     private boolean busy;
@@ -144,11 +151,13 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         // 编辑器自带 Keymap，面板级的 Ctrl+Enter 到不了它，得挂进编辑器自己身上
         Editors.onInvokeShortcut(jsonEditor, this::invoke);
 
-        headersPanel = new RequestHeadersPanel(project, this);
+        headersPanel = new RequestHeadersPanel();
         headersPanel.setOnChanged(this::refreshHeadersTitle);
 
         historyPanel = new CallHistoryPanel(project, this);
         historyPanel.setOnLoad(this::loadArguments);
+        historyPanel.setOnRerun(this::rerunArguments);
+        historyPanel.setCallable(this::canInvoke);
         historyPanel.setOnChanged(this::refreshHistoryTitle);
 
         jsonTab = wrapEditor(jsonEditor);
@@ -206,23 +215,14 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         titleRow.add(badgesLabel);
         titleRow.add(Box.createHorizontalGlue());
 
-        descriptionArea.setEditable(false);
-        descriptionArea.setLineWrap(true);
-        descriptionArea.setWrapStyleWord(true);
-        descriptionArea.setOpaque(false);
-        descriptionArea.setForeground(UIUtil.getLabelForeground());
-        descriptionArea.setBorder(JBUI.Borders.empty(2, 0));
-        JBScrollPane descriptionScroll = new JBScrollPane(descriptionArea);
-        descriptionScroll.setBorder(JBUI.Borders.empty());
-        descriptionScroll.setOpaque(false);
-        descriptionScroll.getViewport().setOpaque(false);
-        descriptionScroll.setPreferredSize(new Dimension(0, JBUI.scale(48)));
+        descriptionLabel.setForeground(UIUtil.getLabelForeground());
+        descriptionLabel.setBorder(JBUI.Borders.emptyTop(2));
 
         JPanel header = new JPanel(new BorderLayout());
         header.setOpaque(false);
         header.setBorder(JBUI.Borders.empty(6, 8, 4, 8));
         header.add(titleRow, BorderLayout.NORTH);
-        header.add(descriptionScroll, BorderLayout.CENTER);
+        header.add(descriptionLabel, BorderLayout.CENTER);
         return header;
     }
 
@@ -294,21 +294,33 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     }
 
     /**
-     * 绑定当前服务器，并决定「请求头」页签在不在。
+     * 绑定当前服务器，并据此决定「请求头」页签在不在。
      *
-     * <p>stdio 的子进程没有请求头这回事，整页签移除；http / sse 插到 JSON 与定义之间。
-     * 之所以在这里按传输类型动态增删、而不是开局就固定三页签：一个恒在但永远填不了的空页签，
-     * 比没有这一页更让人疑惑。
-     *
-     * <p>页签位置固定插在 {@link #HEADERS_TAB_INDEX}，这样"JSON 永远是第一个"这件事不会因为
-     * 换了服务器的传输类型而变——肌肉记忆比"页签顺序好看"重要。
+     * <p>服务器级请求头<b>不</b>在这里——它以工具栏那个「请求头 · N」按钮为入口，打开的是
+     * {@link ServerHeadersDialog} 弹窗（那一层属于服务器，不属于任何条目）。
      */
     public void showConfig(@Nullable McpServerConfig config) {
-        boolean applicable = config != null
-                && config.getTransport() != null && config.getTransport().isHttp();
-        headersPanel.showConfig(applicable ? config : null);
+        this.serverConfig = config;
         // 历史页签三件传输都要：它记的是"调过什么"，和请求头适不适用无关
         historyPanel.showConfig(config);
+        syncHeadersTab();
+    }
+
+    /**
+     * 让「请求头」页签与当前状态对齐：只有 http / sse <b>且选中了具体工具</b>时才存在。
+     *
+     * <p>工具级头按工具存，没选中工具时它没有可编辑的对象；一个恒在却无从下手的空页签，
+     * 比没有这一页更让人疑惑（stdio 同理——子进程根本没有 HTTP 头这回事）。
+     *
+     * <p>页签位置固定插在 {@link #HEADERS_TAB_INDEX}，这样"JSON 永远是第一个"不会因为换了
+     * 服务器的传输类型而变——肌肉记忆比"页签顺序好看"重要。
+     */
+    private void syncHeadersTab() {
+        boolean applicable = serverConfig != null
+                && serverConfig.getTransport() != null && serverConfig.getTransport().isHttp()
+                && tool != null;
+        headersPanel.showConfig(applicable ? serverConfig : null,
+                applicable ? tool.getName() : null);
 
         int index = tabs.indexOfComponent(headersPanel);
         if (applicable) {
@@ -368,11 +380,34 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     }
 
     /**
+     * 「重新调用」：把那一份入参摆回 JSON 页签，然后<b>立刻发出去</b>。
+     *
+     * <p>为什么还是要把内容写回编辑器：按钮承诺的是"再发一次这一份"，让人看见这次到底发了什么，
+     * 下一轮也才能在它的基础上改一个值。写回走 {@code setText}，进撤销栈，Ctrl+Z 能还原。
+     * 这一步不能指望"选中那一行会自动带入"——点的若是当前已选中的那行，选择事件不会来。
+     *
+     * <p>没连上时不会静默失败：{@code McpPanel.invokeTool} 会把"未连接"当作一次失败渲染到结果区。
+     */
+    private void rerunArguments(JsonObject arguments, ToolCallRecord record) {
+        jsonEditor.setText(JsonUtil.pretty(arguments));
+        jsonEditor.setCaretPosition(0);
+        selectDefaultTab();
+        invoke();
+    }
+
+    /**
+     * 现在能不能发起调用。历史卡片里那个按钮据此画成可用 / 禁用，
+     * 它必须和 {@link #invoke()} 自己的前置判断一致，否则会出现"按钮亮着但点了没反应"。
+     */
+    public boolean canInvoke() {
+        return tool != null && !busy && callback != null;
+    }
+
+    /**
      * 回到「JSON」页签。两个调用点：换工具之后、从「历史」带入入参之后——
      * 这两处的下一个动作几乎总是填参数、点调用。
      *
-     * <p>唯一例外是请求头：它挂在服务器上，和"当前选中的是哪个工具"无关，
-     * 正填 token 的时候被顶走会很烦，所以停在那一页不动。
+     * <p>唯一例外是请求头：正填 token 的时候被顶走会很烦，所以停在那一页不动。
      */
     private void selectDefaultTab() {
         if (tabs.getSelectedComponent() != headersPanel) {
@@ -387,9 +422,13 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     /**
      * 没有选中任何条目时的样子。
      *
-     * <p><b>为什么这里还留着参数区</b>：请求头页签就住在这个面板里，而"带鉴权的新服务器"
-     * 恰恰是在<b>没连上、树是空的时候</b>需要填 token 的（没 token 就永远连不上）。
-     * 如果没选中工具时切到另一张"欢迎页"，那一页上就没有请求头入口，首次配置会死锁。
+     * <p><b>为什么还留着参数区</b>：这时想让人看见的只是那句提示（先连上 / 先选个工具），
+     * 而把整块面板换成另一张"欢迎页"，会把「历史」「定义」这些还看得进去的东西一起收走。
+     *
+     * <p>它不再兼任"请求头入口"：服务器级那层在工具栏上（不受连接状态影响，
+     * 见 {@link ServerHeadersDialog}），工具级那层只在选中了具体工具时才出现——
+     * 没选中工具时它没有可编辑的对象，而"没 token 就连不上"恰恰要在连上之前解决，
+     * 所以那个入口必须挂在不受空态影响的地方。
      */
     public void showIdle(String hint) {
         idleKey = null;
@@ -418,6 +457,8 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         prefillArguments(null);
         definitionViewer.setText("");
         historyPanel.showTool(null);
+        // 没有选中工具就没有"这个工具的请求头"可编辑，页签一并撤掉
+        syncHeadersTab();
         selectDefaultTab();
         setBusy(false);
         resultView.clear();
@@ -438,6 +479,8 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         prefillArguments(tool);
         definitionViewer.setText(JsonUtil.pretty(tool.getRaw()));
         historyPanel.showTool(tool);
+        // 工具变了，工具级请求头跟着换一份（服务器级那份在工具栏，不动）
+        syncHeadersTab();
         selectDefaultTab();
         setStatus(StatusKind.NONE, null);
         setBusy(false);
@@ -476,8 +519,7 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
     }
 
     private void setDescription(String text) {
-        descriptionArea.setText(text);
-        descriptionArea.setCaretPosition(0);
+        descriptionLabel.setFullText(text);
     }
 
     private void setBusy(boolean value) {
@@ -487,6 +529,9 @@ public final class ToolDetailPanel extends JPanel implements Disposable {
         invokeButton.setEnabled(!value && tool != null);
         invokeButton.setText(I18n.t(value ? "tool.action.invoking" : "tool.action.invoke"));
         resetButton.setEnabled(!value && tool != null);
+        // 卡片里的「重新调用」是画上去的，"能不能点"变了必须让列表重画一遍才换样子
+        // （历史数据这时没变，refresh() 不会跑）
+        historyPanel.repaintActions();
     }
 
     private static String badges(McpTool tool) {

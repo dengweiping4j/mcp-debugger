@@ -19,10 +19,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 旧版 HTTP+SSE 传输（MCP 2024-11-05 的形态，2025-03-26 起被 Streamable HTTP 取代）。
@@ -35,6 +37,10 @@ import java.util.concurrent.TimeUnit;
  * </ol>
  *
  * <p>所以这条通道天生需要"长连接读线程 + 请求响应配对"，跟 stdio 共用了 {@link AbstractTransport} 的机制。
+ *
+ * <p><b>存活判据</b>是那条 GET 长连接本身（{@link #sseAlive}），不是"拿到过 endpoint"。
+ * 长连接被对端（服务端、反向代理、本地代理）关掉时 endpoint 字段还在，只看它会让传输层
+ * 坚称自己活着——上层于是把死会话原样还回来，用户点"重连"必然先失败一次。
  */
 public class SseTransport extends AbstractTransport {
 
@@ -47,9 +53,27 @@ public class SseTransport extends AbstractTransport {
     private volatile String messageEndpoint;
     private volatile InputStream stream;
 
-    private final CountDownLatch endpointReady = new CountDownLatch(1);
+    /** 端点事件只等一次；每次 {@link #start()} 都换一个新的 latch（同一个实例可重入）。 */
+    private volatile CountDownLatch endpointReady = new CountDownLatch(1);
     private volatile boolean endpointFailed;
     private volatile String endpointFailure = "";
+
+    /**
+     * GET 长连接的读线程是否还在跑——<b>这才是 SSE 的存活判据</b>。
+     *
+     * <p>{@code messageEndpoint != null} 不能当判据：断线之后那个字段依然在，
+     * 于是"已断开"的传输会被当成"还活着"，上面的会话层把死实例原样还回来。
+     */
+    private volatile boolean sseAlive;
+
+    /**
+     * 连接代次。每次 {@link #start()} 自增，读线程记住自己启动时的那一代，
+     * 退出时只有"自己仍是当前代"才允许改状态 / 上报断开。
+     *
+     * <p>没有它就会这样：重连时关掉旧流，旧读线程从 {@code readLine} 里抛出来，
+     * 把这次<b>主动</b>重连报成一条"连接已断开"，顺带把刚置活的 {@code sseAlive} 又抹成 false。
+     */
+    private final AtomicLong generation = new AtomicLong();
 
     public SseTransport(McpServerConfig config) {
         this.config = config;
@@ -57,6 +81,12 @@ public class SseTransport extends AbstractTransport {
 
     @Override
     public void start() throws McpException {
+        // 可重入：先把上一次会话的残留拆干净。不这么做的话，endpointReady 是个已经放行的
+        // latch（await 立刻返回）、messageEndpoint 还是上一个会话的地址、userClosed /
+        // closedReported 还停在"已关"——initialize 会带着旧 endpoint 发出去，服务端当孤儿
+        // 丢掉就是干等超时，于是"重连必先失败一次"。
+        long gen = resetSession();
+
         String raw = config.getUrl();
         if (raw == null || raw.isBlank()) {
             throw new McpException(I18n.t("err.sse.noUrl"));
@@ -81,7 +111,8 @@ public class SseTransport extends AbstractTransport {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(sseUrl))
                 .header("Accept", "text/event-stream")
                 .GET();
-        applyHeaders(builder);
+        // 建连时还不知道要调哪个工具，所以 GET 只带服务器级请求头
+        applyHeaders(builder, null);
 
         HttpResponse<InputStream> response;
         try {
@@ -101,9 +132,14 @@ public class SseTransport extends AbstractTransport {
             throw new McpException(I18n.t("err.sse.badStatus", status, detail));
         }
 
-        this.stream = response.body();
+        InputStream body = response.body();
+        this.stream = body;
+        this.sseAlive = true;
         reportNotice(I18n.t("err.sse.connected", sseUrl));
-        daemonThread("mcp-sse-reader-" + shortId(), this::readLoop).start();
+        // 流当参数传进去，让读线程读自己的那一份：只用字段的话，线程已创建但还没被调度进来时
+        // 撞上 close() / 下一次 start() 把 stream 置成 null，就是一次 NullPointerException
+        // （不是 IOException，下面那个 catch 接不住，只会打到未捕获处理器上）。
+        daemonThread("mcp-sse-reader-" + shortId(), () -> readLoop(gen, body)).start();
 
         try {
             if (!endpointReady.await(ENDPOINT_WAIT.toSeconds(), TimeUnit.SECONDS)) {
@@ -120,13 +156,40 @@ public class SseTransport extends AbstractTransport {
             close();
             throw new McpException(I18n.t("err.sse.noEndpoint", endpointFailure));
         }
+        // 拿到了 endpoint，但长连接可能在这期间就断了——别报一条"成功"，交给下一次请求去说
+        if (!sseAlive) {
+            close();
+            throw new McpException(I18n.t("err.sse.disconnected"));
+        }
         reportNotice(I18n.t("err.sse.endpoint", messageEndpoint));
     }
 
     // ------------------------------------------------------------------
 
-    private void readLoop() {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+    /**
+     * 拆掉上一次会话，并把"一次性"的状态复位，返回新的代次。
+     *
+     * <p>顺序有意如此：<b>先置 {@code userClosed}</b> 再关流，让还在 {@code readLine} 上
+     * 阻塞的旧读线程安静退出（它醒来时看到 gen 已经不是自己那一代，直接返回）；
+     * 否则它会往日志里丢一条误导性的"读取异常 / 连接已断开"。
+     */
+    private long resetSession() {
+        long gen = generation.incrementAndGet();
+        sseAlive = false;
+        userClosed = true;
+        closeQuietly(stream);
+        stream = null;
+        http = null;
+        messageEndpoint = null;
+        endpointFailed = false;
+        endpointFailure = "";
+        endpointReady = new CountDownLatch(1);
+        resetClosedState();
+        return gen;
+    }
+
+    private void readLoop(long gen, InputStream source) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(source, StandardCharsets.UTF_8))) {
             String event = null;
             StringBuilder data = new StringBuilder();
             String line;
@@ -160,11 +223,19 @@ public class SseTransport extends AbstractTransport {
                 }
             }
         } catch (IOException e) {
+            if (generation.get() != gen) {
+                return; // 上一代的读线程，正被 start() 拆掉，不是断线
+            }
             if (!userClosed) {
                 reportNotice(I18n.t("err.sse.readError", JsonUtil.rootMessage(e)));
             }
         }
-        // 到这里说明长连接断了：endpoint 还没等到也要放行，让 start() 报错而不是干等
+        if (generation.get() != gen) {
+            return; // 同上：这次的退出属于已经被取代的旧连接
+        }
+        // 到这里说明长连接断了（或正在被我们拆）：endpoint 还没等到也要放行，
+        // 让 start() 报错而不是干等
+        sseAlive = false;
         endpointReady.countDown();
         if (!userClosed) {
             String reason = I18n.t("err.sse.disconnected");
@@ -214,6 +285,19 @@ public class SseTransport extends AbstractTransport {
 
     @Override
     public JsonObject request(JsonObject request, long timeoutMillis) throws McpException {
+        return request(request, timeoutMillis, null);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>{@code extraHeaders} 是这一次 {@code tools/call} 的工具级请求头；它只影响这次 POST。
+     * 响应仍旧从那条 GET 长连接上回来，所以工具级头加在 POST 上是能到服务端的
+     * （服务端已经把这次请求和它那条 SSE 流关联起来了）。
+     */
+    @Override
+    public JsonObject request(JsonObject request, long timeoutMillis, Map<String, String> extraHeaders)
+            throws McpException {
         ensureEndpoint();
         Long id = JsonRpc.idAsLong(request);
         if (id == null) {
@@ -222,7 +306,7 @@ public class SseTransport extends AbstractTransport {
         String method = JsonRpc.methodOf(request);
         CompletableFuture<JsonObject> box = register(id);
         try {
-            post(request, timeoutMillis);
+            post(request, timeoutMillis, extraHeaders);
         } catch (McpException e) {
             unregister(id);
             throw e;
@@ -233,16 +317,17 @@ public class SseTransport extends AbstractTransport {
     @Override
     public void send(JsonObject message) throws McpException {
         ensureEndpoint();
-        post(message, 20_000L);
+        post(message, 20_000L, null);
     }
 
-    private void post(JsonObject message, long timeoutMillis) throws McpException {
+    private void post(JsonObject message, long timeoutMillis, Map<String, String> extraHeaders)
+            throws McpException {
         reportSend(message);
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(messageEndpoint))
                 .timeout(Duration.ofMillis(Math.max(1000L, timeoutMillis)))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(JsonUtil.compact(message), StandardCharsets.UTF_8));
-        applyHeaders(builder);
+        applyHeaders(builder, extraHeaders);
         try {
             HttpResponse<InputStream> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
             // 旧版规范里 POST 的响应体是空的（消息从 SSE 流回来），读掉即可
@@ -259,10 +344,20 @@ public class SseTransport extends AbstractTransport {
         }
     }
 
-    private void applyHeaders(HttpRequest.Builder builder) {
-        for (Map.Entry<String, String> e : config.headerMap().entrySet()) {
+    /**
+     * 加请求头：服务器级打底，工具级（{@code extraHeaders}）同名覆盖。
+     *
+     * <p>用 {@code setHeader} 而不是 {@code header}：后者是追加，同一个键会出现两个值，
+     * 而"覆盖"才是这里的语义。
+     */
+    private void applyHeaders(HttpRequest.Builder builder, Map<String, String> extraHeaders) {
+        Map<String, String> merged = new LinkedHashMap<>(config.headerMap());
+        if (extraHeaders != null) {
+            merged.putAll(extraHeaders);
+        }
+        for (Map.Entry<String, String> e : merged.entrySet()) {
             try {
-                builder.header(e.getKey(), e.getValue());
+                builder.setHeader(e.getKey(), e.getValue());
             } catch (IllegalArgumentException ex) {
                 reportNotice(I18n.t("err.common.headerRejected", e.getKey()));
             }
@@ -272,6 +367,11 @@ public class SseTransport extends AbstractTransport {
     private void ensureEndpoint() throws McpException {
         if (userClosed) {
             throw new McpException(I18n.t("err.common.closed"));
+        }
+        if (!sseAlive) {
+            // 长连接已经断了。以前这里只看 endpoint 在不在，于是断线之后每个请求都白跑一趟
+            // 才开始失败——现在第一句话就说清楚。
+            throw new McpException(I18n.t("err.sse.disconnected"));
         }
         if (messageEndpoint == null || messageEndpoint.isBlank()) {
             throw new McpException(I18n.t("err.sse.noEndpointYet"));
@@ -291,7 +391,8 @@ public class SseTransport extends AbstractTransport {
 
     @Override
     public boolean isAlive() {
-        return !userClosed && messageEndpoint != null;
+        // 只认长连接本身。看 endpoint 在不在是错的：断线后它还在（见 sseAlive 的注释）。
+        return !userClosed && sseAlive;
     }
 
     @Override
@@ -302,10 +403,14 @@ public class SseTransport extends AbstractTransport {
     @Override
     public void close() {
         userClosed = true;
+        // 先让代次过期，再关流：还在 readLine 上的读线程醒来后不会再改状态、也不会误报断线
+        generation.incrementAndGet();
+        sseAlive = false;
         failPending(I18n.t("err.common.closed"));
         closeQuietly(stream);
         endpointReady.countDown();
         stream = null;
+        messageEndpoint = null;
         http = null;
     }
 

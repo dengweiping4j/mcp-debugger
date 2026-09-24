@@ -52,6 +52,15 @@ public final class McpCallHistory implements PersistentStateComponent<McpCallHis
     /** {@link ToolCallRecord#note} 的最大长度：它只服务 tooltip，留够看清原因即可。 */
     public static final int NOTE_LIMIT = 200;
 
+    /**
+     * {@link ToolCallRecord#response} 的最大长度。
+     *
+     * <p>比 {@link #NOTE_LIMIT} 宽一些：失败原因是一句话，而响应预览常常是
+     * {@code {"ok":true,"count":12,...}} 这种「前几个键就说明白了」的形状，200 字符往往
+     * 刚够看到第一个键。封顶 240 之后，满配 400 条约占 100 KB，对一份 IDE 配置可以接受。
+     */
+    public static final int RESPONSE_LIMIT = 240;
+
     /** 持久化载体：字段全部 public，保证 XmlSerializer 在任意平台版本下都能读写。 */
     public static class State {
         /**
@@ -132,6 +141,10 @@ public final class McpCallHistory implements PersistentStateComponent<McpCallHis
             top.elapsedMillis = record.elapsedMillis;
             top.status = record.status;
             top.note = record.note;
+            // 响应必须一起刷新：同一份入参重发，结果完全可能变了（上次超时、这次通了），
+            // 而卡片上"响应预览"正是用来看这个变化的那一格。漏了它就会出现
+            // "状态写着失败、预览却还留着上次成功的内容"这种自相矛盾的卡片。
+            top.response = record.response;
         } else {
             all.add(0, record);
         }

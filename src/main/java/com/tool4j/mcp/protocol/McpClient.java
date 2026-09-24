@@ -18,6 +18,7 @@ import com.tool4j.mcp.transport.Transports;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -87,6 +88,14 @@ public class McpClient implements AutoCloseable {
     private volatile boolean connected;
     private volatile boolean closed;
 
+    /**
+     * 这个会话成功连上过。
+     *
+     * <p>用来区分"新建、还没连"和"连上了又断开"：前者传输层是"没活着"的（{@code start()}
+     * 压根还没跑），不能据此判断它不可用；后者才是真的需要重建。见 {@link #isReusable()}。
+     */
+    private volatile boolean everConnected;
+
     /** 项目根目录之类的 roots，用于应答服务端的 {@code roots/list}。 */
     private volatile List<String> rootUris = List.of();
 
@@ -137,6 +146,7 @@ public class McpClient implements AutoCloseable {
             // 规范要求：initialize 成功后必须补一条 initialized 通知，之后才允许发别的请求
             transport.send(JsonRpc.notification("notifications/initialized", new JsonObject()));
             connected = true;
+            everConnected = true;
 
             if (serverInfo.getInstructions() != null && !serverInfo.getInstructions().isBlank()) {
                 print(I18n.t("client.log.instructions", serverInfo.getInstructions().strip()));
@@ -347,14 +357,16 @@ public class McpClient implements AutoCloseable {
         JsonObject params = new JsonObject();
         params.addProperty("name", name);
         params.add("arguments", arguments == null ? new JsonObject() : arguments);
-        return invoke("tools/call", params, I18n.t("client.what.tool", name));
+        // 工具级请求头只挂在这一种请求上：握手、列表、读资源这些不属于任何工具，
+        // 建连时更不知道要调哪个工具，所以它们只带服务器级。
+        return invoke("tools/call", params, I18n.t("client.what.tool", name), config.headerMapFor(name));
     }
 
     /** 读取一个资源。 */
     public McpCallResult readResource(String uri) {
         JsonObject params = new JsonObject();
         params.addProperty("uri", uri);
-        return invoke("resources/read", params, I18n.t("client.what.resource", uri));
+        return invoke("resources/read", params, I18n.t("client.what.resource", uri), null);
     }
 
     /** 取一个提示词（返回的 messages 在 {@link McpCallResult#getRaw()} 里）。 */
@@ -364,15 +376,16 @@ public class McpClient implements AutoCloseable {
         if (arguments != null && arguments.size() > 0) {
             params.add("arguments", arguments);
         }
-        return invoke("prompts/get", params, I18n.t("client.what.prompt", name));
+        return invoke("prompts/get", params, I18n.t("client.what.prompt", name), null);
     }
 
-    private McpCallResult invoke(String method, JsonObject params, String what) {
+    private McpCallResult invoke(String method, JsonObject params, String what,
+                                 Map<String, String> extraHeaders) {
         long started = System.nanoTime();
         McpCallResult result;
         try {
             stage(I18n.t("client.stage.calling", what));
-            result = new McpCallResult(request(method, params));
+            result = new McpCallResult(request(method, params, extraHeaders));
         } catch (McpException e) {
             result = new McpCallResult(null);
             result.setError(e.getDisplayMessage());
@@ -390,11 +403,22 @@ public class McpClient implements AutoCloseable {
 
     /** 发一条请求并返回 {@code result}；服务端返回 error 时抛 {@link McpException}。 */
     private JsonObject request(String method, JsonObject params) throws McpException {
+        return request(method, params, null);
+    }
+
+    /**
+     * 发一条请求，并给这一次请求叠一组额外请求头（工具级请求头）。
+     *
+     * @param extraHeaders 服务器级之上再叠的键值对；非 HTTP 传输会忽略它
+     */
+    private JsonObject request(String method, JsonObject params, Map<String, String> extraHeaders)
+            throws McpException {
         if (userClosedOrDead() && !"initialize".equals(method)) {
             throw new McpException(I18n.t("client.err.disconnected"));
         }
         long id = idSequence.getAndIncrement();
-        JsonObject response = transport.request(JsonRpc.request(id, method, params), timeoutMillis());
+        JsonObject response = transport.request(JsonRpc.request(id, method, params), timeoutMillis(),
+                extraHeaders);
         if (response == null) {
             throw new McpException(I18n.t("client.err.noResponse", method));
         }
@@ -426,6 +450,29 @@ public class McpClient implements AutoCloseable {
      */
     public boolean isClosed() {
         return closed;
+    }
+
+    /**
+     * 这个实例还能不能拿去用（而不是就地重建一个）。
+     *
+     * <p>两条"不可复用"：
+     * <ol>
+     *   <li>已经 {@link #close()} 过——见 {@link #isClosed()}；</li>
+     *   <li>连上过、但传输层已经死了。<b>典型就是 SSE：长连接被服务端或中间层掐掉之后</b>，
+     *   底层 endpoint 字段还在、{@code closed} 也没置位，于是这个实例看起来"还在"，
+     *   实际一个请求也发不出去，而它自己不会重建传输。以前
+     *   {@link com.tool4j.mcp.service.McpProjectService} 只看 {@code isClosed()}，
+     *   结果把死实例原样还回来——用户点一次「连接」必然先失败一次。</li>
+     * </ol>
+     *
+     * <p>只"从没连上过"的实例算可复用：它的传输还没 {@code start()}，{@code isAlive()}
+     * 天然是 false，那不是死亡证据。
+     */
+    public boolean isReusable() {
+        if (closed) {
+            return false;
+        }
+        return !everConnected || transport.isAlive();
     }
 
     private long timeoutMillis() {

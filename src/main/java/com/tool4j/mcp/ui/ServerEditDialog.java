@@ -19,6 +19,7 @@ import com.tool4j.mcp.i18n.I18n;
 import com.tool4j.mcp.protocol.McpException;
 import com.tool4j.mcp.model.KeyValue;
 import com.tool4j.mcp.model.McpServerConfig;
+import com.tool4j.mcp.model.ToolHeaders;
 import com.tool4j.mcp.model.TransportType;
 import com.tool4j.mcp.protocol.JsonUtil;
 import com.tool4j.mcp.protocol.McpClient;
@@ -425,9 +426,11 @@ public final class ServerEditDialog extends DialogWrapper {
         config.setWorkingDir(workingDirField.getText() == null ? "" : workingDirField.getText().trim());
         config.setUrl(urlField.getText() == null ? "" : urlField.getText().trim());
         config.setEnv(envTable.getRows());
-        // 请求头不在这个对话框里编辑（见工具窗口的「请求头」栏），但编辑已有服务器时必须原样带过去：
-        // applyTo() 是整份覆盖，不带上就等于"点一次保存把 token 抹掉"。
+        // 请求头不在这个对话框里编辑（服务器级在工具栏的「请求头」入口、工具级在工具详情的页签里），
+        // 但编辑已有服务器时必须原样带过去：applyTo() 是整份覆盖，不带上就等于"点一次保存把 token 抹掉"。
+        // toolHeaders 同理——它是 1.0.5 新增的一层，漏掉这行会连带把工具级头一起清空。
         config.setHeaders(copyHeaders(original));
+        config.setToolHeaders(copyToolHeaders(original));
         String protocolVersion = protocolVersionField.getText() == null
                 ? "" : protocolVersionField.getText().trim();
         config.setProtocolVersion(protocolVersion.isEmpty()
@@ -448,6 +451,18 @@ public final class ServerEditDialog extends DialogWrapper {
         if (source != null) {
             for (KeyValue kv : source.getHeaders()) {
                 out.add(kv.copy());
+            }
+        }
+        return out;
+    }
+
+    private static List<ToolHeaders> copyToolHeaders(@Nullable McpServerConfig source) {
+        List<ToolHeaders> out = new ArrayList<>();
+        if (source != null) {
+            for (ToolHeaders entry : source.getToolHeaders()) {
+                if (entry != null) {
+                    out.add(entry.copy());
+                }
             }
         }
         return out;

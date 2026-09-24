@@ -19,6 +19,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -87,7 +88,19 @@ public class HttpTransport extends AbstractTransport {
 
     @Override
     public JsonObject request(JsonObject request, long timeoutMillis) throws McpException {
-        HttpResponse<InputStream> response = exchange(request, timeoutMillis);
+        return request(request, timeoutMillis, null);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>{@code extraHeaders} 是<b>这一次调用</b>（{@code tools/call}）的工具级请求头，
+     * 逐键叠在服务器级之上，同名以它为准。
+     */
+    @Override
+    public JsonObject request(JsonObject request, long timeoutMillis, Map<String, String> extraHeaders)
+            throws McpException {
+        HttpResponse<InputStream> response = exchange(request, timeoutMillis, extraHeaders);
         int status = response.statusCode();
         String contentType = header(response, "content-type").toLowerCase(Locale.ROOT);
 
@@ -122,7 +135,7 @@ public class HttpTransport extends AbstractTransport {
 
     @Override
     public void send(JsonObject message) throws McpException {
-        HttpResponse<InputStream> response = exchange(message, SEND_TIMEOUT_MILLIS);
+        HttpResponse<InputStream> response = exchange(message, SEND_TIMEOUT_MILLIS, null);
         int status = response.statusCode();
         // 一定要把 body 读掉/关掉，否则连接不会归还池子
         readAll(response.body());
@@ -131,7 +144,8 @@ public class HttpTransport extends AbstractTransport {
         }
     }
 
-    private HttpResponse<InputStream> exchange(JsonObject message, long timeoutMillis) throws McpException {
+    private HttpResponse<InputStream> exchange(JsonObject message, long timeoutMillis,
+                                               Map<String, String> extraHeaders) throws McpException {
         if (http == null || url == null) {
             throw new McpException(I18n.t("err.http.notStarted"));
         }
@@ -139,7 +153,7 @@ public class HttpTransport extends AbstractTransport {
             throw new McpException(I18n.t("err.common.closed"));
         }
         reportSend(message);
-        HttpRequest httpRequest = buildRequest(message, timeoutMillis);
+        HttpRequest httpRequest = buildRequest(message, timeoutMillis, extraHeaders);
         try {
             HttpResponse<InputStream> response = http.send(httpRequest, HttpResponse.BodyHandlers.ofInputStream());
             String sid = header(response, SESSION_HEADER);
@@ -158,7 +172,8 @@ public class HttpTransport extends AbstractTransport {
         }
     }
 
-    private HttpRequest buildRequest(JsonObject message, long timeoutMillis) throws McpException {
+    private HttpRequest buildRequest(JsonObject message, long timeoutMillis,
+                                     Map<String, String> extraHeaders) throws McpException {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofMillis(Math.max(1000L, timeoutMillis)))
                 .header("Content-Type", "application/json")
@@ -166,16 +181,22 @@ public class HttpTransport extends AbstractTransport {
                 .header("Accept", "application/json, text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofString(JsonUtil.compact(message), StandardCharsets.UTF_8));
 
-        for (Map.Entry<String, String> e : config.headerMap().entrySet()) {
+        // 服务器级打底，工具级覆盖。用 setHeader 而不是 header：后者是"追加"，
+        // 同一个键写两次会变成两个头值，而"覆盖"才是这里的语义（用户配了 Content-Type 也该以他为准）。
+        Map<String, String> merged = new LinkedHashMap<>(config.headerMap());
+        if (extraHeaders != null) {
+            merged.putAll(extraHeaders);
+        }
+        for (Map.Entry<String, String> e : merged.entrySet()) {
             try {
-                builder.header(e.getKey(), e.getValue());
+                builder.setHeader(e.getKey(), e.getValue());
             } catch (IllegalArgumentException ex) {
                 // JDK 禁止应用层设置 Connection / Host / Content-Length 之类的头
                 reportNotice(I18n.t("err.common.headerRejected", e.getKey()));
             }
         }
         if (sessionId != null && !sessionId.isBlank()) {
-            builder.header(SESSION_HEADER, sessionId);
+            builder.setHeader(SESSION_HEADER, sessionId);
         }
         return builder.build();
     }

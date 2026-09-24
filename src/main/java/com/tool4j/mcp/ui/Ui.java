@@ -28,6 +28,7 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
@@ -56,6 +57,13 @@ public final class Ui {
     public static final JBColor TRAFFIC_IN = new JBColor(new Color(0x1F7A3D), new Color(0x63C58A));
     /** 子进程 stderr / 传输层提示。 */
     public static final JBColor TRAFFIC_NOTICE = new JBColor(new Color(0x9A6A00), new Color(0xD9A94A));
+    /**
+     * 自绘按钮的悬停填充。<b>半透明</b>是刻意的：它要叠在任意底色（列表背景、选中背景、卡片底色）
+     * 上都成立，写死一个实色在另一个主题里就会变成一块脏斑。
+     */
+    public static final JBColor HOVER_FILL = new JBColor(new Color(0, 0, 0, 26), new Color(255, 255, 255, 30));
+    /** 自绘按钮的按下填充，比悬停再重一档。 */
+    public static final JBColor PRESS_FILL = new JBColor(new Color(0, 0, 0, 52), new Color(255, 255, 255, 58));
 
     private Ui() {
     }
@@ -357,6 +365,41 @@ public final class Ui {
         }
         String t = text.strip();
         return t.length() <= max ? t : t.substring(0, Math.max(1, max - 1)) + "…";
+    }
+
+    /**
+     * 把单行文字截到给定的像素宽，放不下就在末尾加「…」。二分找最长的能放下的前缀。
+     *
+     * <p>按<b>像素</b>而不是按字数：CJK 与 ASCII 的宽度差一倍，按字数截必然一段长一段短。
+     *
+     * <p>宽度的基数由调用方给：控件自己的宽度不一定等于"看得见的那块"
+     * （塞在视口里的列表要取 {@code getVisibleRect().width}，否则算出来的文字会正好被滚动条压住）。
+     * 传进来的文字请先自己拍平成单行——换行符在 {@code JLabel} 里画成一个方框。
+     */
+    public static String truncateToWidth(JBLabel label, String text, int width) {
+        String value = text == null ? "" : text;
+        if (value.isEmpty() || width <= 0) {
+            return value;
+        }
+        FontMetrics metrics = label.getFontMetrics(label.getFont());
+        if (metrics.stringWidth(value) <= width) {
+            return value;
+        }
+        int available = width - metrics.stringWidth("…");
+        if (available <= 0) {
+            return "…";
+        }
+        int low = 0;
+        int high = value.length();
+        while (low < high) {
+            int mid = (low + high + 1) >>> 1;
+            if (metrics.stringWidth(value.substring(0, mid)) <= available) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return value.substring(0, low) + "…";
     }
 
     /** 分隔线，颜色跟随 LAF。 */

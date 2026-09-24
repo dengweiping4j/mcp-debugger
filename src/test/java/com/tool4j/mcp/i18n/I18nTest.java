@@ -76,7 +76,7 @@ class I18nTest {
     @Test
     @DisplayName("占位符 {0} {1} 按普通替换生效，且英文里的单引号不会吃掉占位符")
     void placeholdersArePlainSubstitution() {
-        String desc = I18n.t("lang.action.desc", "中文", "English");
+        String desc = I18n.t("err.call.failed", "中文", "English");
         assertTrue(desc.contains("中文"), "第一个占位符没被替换：" + desc);
         assertTrue(desc.contains("English"), "第二个占位符没被替换：" + desc);
         assertFalse(desc.contains("{0}") || desc.contains("{1}"), "占位符没被替换干净：" + desc);
@@ -86,15 +86,15 @@ class I18nTest {
     @DisplayName("切到中文后取到的是中文文案，切回来恢复英文")
     void switchingLanguageChangesTheText() {
         I18n.setLocale(Locale.ENGLISH);
-        String english = I18n.t("lang.action.text");
+        String english = I18n.t("lang.menu.text");
         assertEquals(I18n.EN, I18n.getLanguageTag());
 
         I18n.setLocale(Locale.SIMPLIFIED_CHINESE);
         assertEquals(I18n.ZH, I18n.getLanguageTag());
-        assertNotEquals(english, I18n.t("lang.action.text"), "切到中文后文案没变");
+        assertNotEquals(english, I18n.t("lang.menu.text"), "切到中文后文案没变");
 
         I18n.setLocale(Locale.ENGLISH);
-        assertEquals(english, I18n.t("lang.action.text"), "切回英文后文案没恢复");
+        assertEquals(english, I18n.t("lang.menu.text"), "切回英文后文案没恢复");
     }
 
     @Test
@@ -102,7 +102,7 @@ class I18nTest {
     void unknownLocaleFallsBackToEnglish() {
         I18n.setLocale(Locale.GERMANY);
         assertEquals(I18n.EN, I18n.getLanguageTag());
-        assertFalse(I18n.t("lang.action.text").isEmpty());
+        assertFalse(I18n.t("lang.menu.text").isEmpty());
     }
 
     @Test

@@ -7,7 +7,7 @@ import com.tool4j.mcp.i18n.I18n;
 import java.util.Locale;
 
 /**
- * 界面语言偏好：检测、持久化、一键切换。
+ * 界面语言偏好：检测、持久化、显式指定。
  *
  * <p><b>全工程唯一接触 {@code com.intellij.*} 的语言相关类。</b>其余代码一律走 {@link I18n}，
  * 这样 {@code protocol/}、{@code transport/}、{@code model/} 才能保持零平台依赖。
@@ -17,6 +17,9 @@ import java.util.Locale;
  * 装了中文语言包后由语言包声明的 {@code LanguageBundleEP} 经 {@code loadLocale(...)} 改成
  * {@code zh-CN}。它<b>不返回系统 locale</b>，所以不会出现"英文 IDE + 中文系统"拿到中文界面
  * 这种随宿主环境漂移的行为——因此这里刻意不混 {@code Locale.getDefault()}。
+ *
+ * <p>「自动」只是<b>没有显式偏好时的默认态</b>（老配置 / 刚装好），界面上没有切回去的入口：
+ * 用户一旦选了语言就一直显式生效。切换入口在面板「管理」→「语言切换」子菜单里。
  */
 public final class LanguageSupport {
 
@@ -53,23 +56,9 @@ public final class LanguageSupport {
         return McpSettings.getInstance().getUiLanguage();
     }
 
-    public static boolean isAuto() {
-        return AUTO.equals(getPreference());
-    }
-
     /** 显式指定语言：{@link #AUTO} / {@link #ZH} / {@link #EN}。 */
     public static void setPreference(String preference) {
         McpSettings.getInstance().setUiLanguage(preference);
         apply();
-    }
-
-    /**
-     * 一键切换：在当前生效语言与另一种语言之间来回切，并落成显式偏好。
-     *
-     * <p>刻意不做成"中 → 英 → 自动"三态循环：自动是"复位"，不是"第三种语言"，
-     * 把它夹在循环里会让用户猜不到下一次点击会变成什么。复位入口放在「管理」菜单里。
-     */
-    public static void toggle() {
-        setPreference(I18n.ZH.equals(I18n.getLanguageTag()) ? EN : ZH);
     }
 }
